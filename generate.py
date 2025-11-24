@@ -60,6 +60,11 @@ def main(args):
     text_corpus = 'data/wikitext103.te'
     with open(text_corpus, 'r') as _f:
         texts = _f.read().splitlines()
+    temp_texts = []
+    for text in texts:
+        if 35<= len(text) <= 61:
+            temp_texts.append(text)
+    texts = temp_texts
     each_process = len(texts)//totol_process
     if  len(texts)%totol_process == 0:
         temp_texts = texts[dist.get_rank()*each_process:(dist.get_rank()+1)*each_process]
