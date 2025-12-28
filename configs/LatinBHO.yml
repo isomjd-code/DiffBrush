@@ -1,0 +1,36 @@
+DATASET: LatinBHO
+DATA_LOADER:
+  NUM_THREADS: 12
+MODEL:
+  STYLE_ENCODER_LAYERS: 3
+  NUM_IMGS: 15
+  IN_CHANNELS: 4
+  OUT_CHANNELS: 4
+  NUM_RES_BLOCKS: 1
+  NUM_HEADS: 4
+  EMB_DIM: 512
+SOLVER:
+  BASE_LR: 0.0001
+  EPOCHS: 2000
+  WARMUP_ITERS: 20000
+  TYPE: AdamW
+  GRAD_L2_CLIP: 5.0
+TRAIN:
+  TYPE: train
+  IMS_PER_BATCH: 2
+  IMG_H: 64
+  IMG_W: 64
+  IMAGE_PATH: data/LatinBHO/images
+  STYLE_PATH: data/LatinBHO/style_images
+  LABEL_PATH: data/LatinBHO/train.txt
+  SNAPSHOT_ITERS: 3000
+  SNAPSHOT_BEGIN: 0
+  SEED: 1001
+TEST:
+  TYPE: test
+  IMS_PER_BATCH: 8
+  IMG_H: 64
+  IMAGE_PATH: data/LatinBHO/images
+  STYLE_PATH: data/LatinBHO/style_images
+  LABEL_PATH: data/LatinBHO/test.txt
+

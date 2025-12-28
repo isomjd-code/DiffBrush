@@ -83,6 +83,7 @@ class BaseDataset(Dataset):
         style_images = [style_image/255.0 for style_image in style_images]
         new_style_images = np.ones([1, height, max_w], dtype=np.float32)
         new_style_images[0, :, :style_images[0].shape[1]] = style_images[0]
+        return new_style_images
 
 
     def get_symbols(self, input_type):
@@ -152,11 +153,47 @@ class BaseDataset(Dataset):
         transcr = label
         img_path = os.path.join(self.image_path, wr_id, image_name)
         image = Image.open(img_path).convert('RGB')
-        # image.save('./image.png')
-        if image.size[0] < critical_width and self.type == 'train':
-            image = np.array(image)
-            image, transcr = self.concat_short_img(image, transcr)
-            image = Image.fromarray(image)
+        
+        # Resize and pad image to fixed dimensions
+        # Target: width=1024 (fixed_len), height=128
+        target_width = self.fixed_len
+        target_height = 128
+        
+        # Get current dimensions
+        orig_width, orig_height = image.size
+        
+        # Resize if width > target_width (maintain aspect ratio)
+        if orig_width > target_width:
+            # Calculate new height maintaining aspect ratio
+            new_height = int(orig_height * (target_width / orig_width))
+            image = image.resize((target_width, new_height), Image.Resampling.LANCZOS)
+            orig_width, orig_height = image.size
+        
+        # Pad to target dimensions
+        # Convert to numpy for padding
+        img_array = np.array(image)
+        
+        # Calculate padding needed
+        pad_width = target_width - orig_width  # Padding for width (right side)
+        pad_height_top = (target_height - orig_height) // 2  # Padding for height (top)
+        pad_height_bottom = target_height - orig_height - pad_height_top  # Padding for height (bottom)
+        
+        # Pad: ((top, bottom), (left, right), (channels))
+        if len(img_array.shape) == 2:  # Grayscale
+            img_array = np.pad(img_array, 
+                             ((pad_height_top, pad_height_bottom), (0, pad_width)), 
+                             mode='constant', constant_values=255)
+            # Convert back to RGB by stacking
+            img_array = np.stack([img_array, img_array, img_array], axis=2)
+        else:  # RGB
+            img_array = np.pad(img_array, 
+                             ((pad_height_top, pad_height_bottom), (0, pad_width), (0, 0)), 
+                             mode='constant', constant_values=255)
+        
+        # Convert back to PIL Image
+        image = Image.fromarray(img_array.astype(np.uint8))
+        
+        # Apply transforms (normalization)
         image = self.transforms(image)
         
         style_ref= self.get_style_ref(wr_id)
@@ -179,8 +216,10 @@ class BaseDataset(Dataset):
             contents.append(con_symbol)
         contents = torch.cat(contents, dim=-1)
         contents = contents.numpy()
-        ratio_w = image.shape[-1]
-        contents = cv2.resize(contents, (ratio_w, 64))
+        # Resize glyph to match image width (which is now fixed_len = 1024 after preprocessing)
+        # The image has already been resized/padded to fixed_len width
+        target_width = self.fixed_len
+        contents = cv2.resize(contents, (target_width, 64))
         contents = 1. - contents
         # cv2.imwrite('glyph.png', contents*255)
         contents = np.stack((contents, contents, contents), axis=2)
@@ -207,10 +246,17 @@ class BaseDataset(Dataset):
             word_transcr = transcr[h:t+1] + ' ' * len(transcr[t + 1:])
             word_transcrs.append(word_transcr)
 
+        # Convert writer ID to int (handle both string and int IDs)
+        try:
+            wid_int = int(wr_id)
+        except (ValueError, TypeError):
+            # If wr_id is not numeric, use hash to convert to int (for consistency)
+            wid_int = hash(str(wr_id)) % (2**31)  # Keep within int32 range
+        
         return {'img':image,
                 'content':transcr, 
                 'style':style_ref,
-                'wid':int(wr_id),
+                'wid':wid_int,
                 'transcr':transcr,
                 'image_name':image_name,
                 'word_idx': word_idx,
@@ -221,7 +267,8 @@ class BaseDataset(Dataset):
         width = [item['img'].shape[2] for item in batch]
         c_width = [len(item['content']) for item in batch]
         s_width = [item['style'].shape[2] for item in batch]
-        max_s_width = max(s_width)
+        # Clamp max_s_width to fixed_len to handle style images that are wider than fixed_len
+        max_s_width = min(max(s_width), self.fixed_len)
 
         transcr = [item['transcr'] for item in batch]
         target_lengths = torch.IntTensor([len(t) for t in transcr])
@@ -247,13 +294,26 @@ class BaseDataset(Dataset):
                 print('content', item['content'])
             target[idx, :len(transcr[idx])] = torch.Tensor([self.letter2index[t] for t in transcr[idx]])
             try:
-                if max_s_width < self.fixed_len:
-                    style_ref[idx, :, :, 0:item['style'].shape[2]] = item['style']
+                # Handle style images - crop to fixed_len if wider, or pad if narrower
+                style_width = item['style'].shape[2]
+                if style_width <= max_s_width:
+                    # Style image fits within max_s_width
+                    style_ref[idx, :, :, 0:style_width] = item['style']
                 else:
-                    style_ref[idx, :, :, 0:item['style'].shape[2]] = item['style'][:, :, :self.fixed_len]
-            except:
-                print('style', item['style'].shape)
-            glyph_line[idx, :, :, 0:item['glyph_line'].shape[2]] = item['glyph_line']
+                    # Style image is wider than max_s_width, crop it
+                    style_ref[idx, :, :, 0:max_s_width] = item['style'][:, :, :max_s_width]
+            except Exception as e:
+                print('style', item['style'].shape, 'max_s_width', max_s_width, 'error', e)
+            # Glyph_line is already resized to fixed_len in __getitem__
+            try:
+                glyph_width = item['glyph_line'].shape[2]
+                if glyph_width <= self.fixed_len:
+                    glyph_line[idx, :, :, 0:glyph_width] = item['glyph_line']
+                else:
+                    # Safety check: if somehow wider, crop it
+                    glyph_line[idx, :, :, 0:self.fixed_len] = item['glyph_line'][:, :, :self.fixed_len]
+            except Exception as e:
+                print('glyph_line', item['glyph_line'].shape, e)
         
         lexicon, lexicon_length = self.encode(transcr)
 

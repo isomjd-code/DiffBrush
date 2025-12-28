@@ -99,8 +99,12 @@ class Diffusion:
         # for time, time_next in tqdm(time_pairs, position=1, leave=False, desc='sampling'):
         for time, time_next in time_pairs:
             tmp_time, tmp_time_next = time, time_next
-            time = (total_timesteps * time).long().to(self.device)
-            time_next = (total_timesteps * time_next).long().to(self.device)
+            batch_size = x.shape[0]
+            # Clamp time values to valid range [0, total_timesteps-1]
+            time_val = max(0, min(total_timesteps - 1, int(total_timesteps * time)))
+            time_next_val = max(0, min(total_timesteps - 1, int(total_timesteps * time_next)))
+            time = (torch.ones(batch_size) * time_val).long().to(self.device)
+            time_next = (torch.ones(batch_size) * time_next_val).long().to(self.device)
             
             predicted_noise, vertical_proxy_loss, horizontal_proxy_loss = model(x, time, styles, content, wid, tag='train')
             noise_list.append(predicted_noise)
@@ -109,7 +113,8 @@ class Diffusion:
             alpha_hat_next = self.alpha_hat[time_next][:, None, None, None]
             # denoise to approximately x0
             x_start = (x - (1 - alpha_hat).sqrt()*predicted_noise) / (alpha_hat.sqrt())
-            if time_next[0] < 0:
+            # Check if we're at the final timestep (time_next_val == 0 after clamping)
+            if time_next_val == 0:
                 x = x_start
                 continue
             
@@ -125,15 +130,20 @@ class Diffusion:
             break
         
         for time, time_next in time_pairs:
-            time = (total_timesteps * time).long().to(self.device)
-            time_next = (total_timesteps * time_next).long().to(self.device)
+            batch_size = x.shape[0]
+            # Clamp time values to valid range [0, total_timesteps-1]
+            time_val = max(0, min(total_timesteps - 1, int(total_timesteps * time)))
+            time_next_val = max(0, min(total_timesteps - 1, int(total_timesteps * time_next)))
+            time = (torch.ones(batch_size) * time_val).long().to(self.device)
+            time_next = (torch.ones(batch_size) * time_next_val).long().to(self.device)
             predicted_noise = model(x, time, styles, content)
             beta = self.beta[time][:, None, None, None]
             alpha_hat = self.alpha_hat[time][:, None, None, None]
             alpha_hat_next = self.alpha_hat[time_next][:, None, None, None]
             # denoise to approximately x0
             x_start = (x - (1 - alpha_hat).sqrt()*predicted_noise) / (alpha_hat.sqrt())
-            if time_next[0] < 0:
+            # Check if we're at the final timestep (time_next_val == 0 after clamping)
+            if time_next_val == 0:
                 x = x_start
                 continue
             
@@ -146,7 +156,7 @@ class Diffusion:
                 c * predicted_noise + \
                 sigma * noise # re-noising to x_t from approximately x0
         
-        return x, noise_list[0], vertical_proxy_loss, horizontal_proxy_loss
+        return noise_list[0], vertical_proxy_loss, horizontal_proxy_loss
 
 
     def train_ddim_wo_nce(self, model, x, styles, content, total_t, sampling_timesteps=6, eta=0):
@@ -158,8 +168,12 @@ class Diffusion:
         noise_list = []
         # for time, time_next in tqdm(time_pairs, position=1, leave=False, desc='sampling'):
         for time, time_next in time_pairs:
-            time = (total_timesteps * time).long().to(self.device)
-            time_next = (total_timesteps * time_next).long().to(self.device)
+            batch_size = x.shape[0]
+            # Clamp time values to valid range [0, total_timesteps-1]
+            time_val = max(0, min(total_timesteps - 1, int(total_timesteps * time)))
+            time_next_val = max(0, min(total_timesteps - 1, int(total_timesteps * time_next)))
+            time = (torch.ones(batch_size) * time_val).long().to(self.device)
+            time_next = (torch.ones(batch_size) * time_next_val).long().to(self.device)
             
             predicted_noise = model(x, time_next, styles, content)
             noise_list.append(predicted_noise)
@@ -170,7 +184,8 @@ class Diffusion:
             
             # denoise to approximately x0
             x_start = (x - (1 - alpha_hat).sqrt()*predicted_noise) / (alpha_hat.sqrt())
-            if time_next[0] < 0:
+            # Check if we're at the final timestep (time_next_val == 0 after clamping)
+            if time_next_val == 0:
                 x = x_start
                 continue
             
@@ -193,8 +208,12 @@ class Diffusion:
         x_start = None
         # for time, time_next in tqdm(time_pairs, position=1, leave=False, desc='sampling'):
         for time, time_next in time_pairs:
-            time = (total_timesteps * time).long().to(self.device)
-            time_next = (total_timesteps * time_next).long().to(self.device)
+            batch_size = x.shape[0]
+            # Clamp time values to valid range [0, total_timesteps-1]
+            time_val = max(0, min(total_timesteps - 1, int(total_timesteps * time)))
+            time_next_val = max(0, min(total_timesteps - 1, int(total_timesteps * time_next)))
+            time = (torch.ones(batch_size) * time_val).long().to(self.device)
+            time_next = (torch.ones(batch_size) * time_next_val).long().to(self.device)
             
             predicted_noise = model(x, time, styles, content)
             beta = self.beta[time][:, None, None, None]
@@ -202,7 +221,8 @@ class Diffusion:
             alpha_hat_next = self.alpha_hat[time_next][:, None, None, None]
             # denoise to approximately x0
             x_start = (x - (1 - alpha_hat).sqrt()*predicted_noise) / (alpha_hat.sqrt())
-            if time_next[0] < 0:
+            # Check if we're at the final timestep (time_next_val == 0 after clamping)
+            if time_next_val == 0:
                 x = x_start
                 continue
             
@@ -346,8 +366,12 @@ class Diffusion:
         x_start = None
         
         for time, time_next in time_pairs:
-            time = (total_timesteps * time).long().to(self.device)
-            time_next = (total_timesteps * time_next).long().to(self.device)
+            batch_size = x.shape[0]
+            # Clamp time values to valid range [0, total_timesteps-1]
+            time_val = max(0, min(total_timesteps - 1, int(total_timesteps * time)))
+            time_next_val = max(0, min(total_timesteps - 1, int(total_timesteps * time_next)))
+            time = (torch.ones(batch_size) * time_val).long().to(self.device)
+            time_next = (torch.ones(batch_size) * time_next_val).long().to(self.device)
             predicted_noise = model(x, time, styles, laplace, content)
 
             beta = self.beta[time][:, None, None, None]
@@ -356,7 +380,8 @@ class Diffusion:
             
             x_start = (x - (1 - alpha_hat).sqrt()*predicted_noise) / (alpha_hat.sqrt())
             
-            if time_next[0] < 0:
+            # Check if we're at the final timestep (time_next_val == 0 after clamping)
+            if time_next_val == 0:
                 x = x_start
                 continue
             

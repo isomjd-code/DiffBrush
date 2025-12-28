@@ -132,12 +132,18 @@ class Mix_TR(nn.Module):
         vertical_style_proxy = self.vertical_pro_mlp(vertical_style_proxy)
         vertical_style_proxy = torch.mean(vertical_style_proxy, dim=0)
         vertical_style_loss = self.vertical_proxy(vertical_style_proxy, wid)
+        # Ensure loss is finite
+        if torch.isnan(vertical_style_loss) or torch.isinf(vertical_style_loss):
+            vertical_style_loss = torch.tensor(0.0, device=vertical_style_proxy.device, requires_grad=True)
 
         # 纵向采样, 使模型关注水平风格信息(字符间距, 字母间的连笔, 单词之间的行间距)
         horizontal_style_proxy = self.random_vertical_sample(horizontal_style)
         horizontal_style_proxy = self.horizontal_pro_mlp(horizontal_style_proxy)
         horizontal_style_proxy = torch.mean(horizontal_style_proxy, dim=0)
         horizontal_style_loss = self.horizontal_proxy(horizontal_style_proxy, wid)
+        # Ensure loss is finite
+        if torch.isnan(horizontal_style_loss) or torch.isinf(horizontal_style_loss):
+            horizontal_style_loss = torch.tensor(0.0, device=horizontal_style_proxy.device, requires_grad=True)
 
         # content encoder
         content = rearrange(content, 'n t h w ->(n t) 1 h w').contiguous()

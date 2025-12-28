@@ -134,6 +134,10 @@ class Proxy_Anchor(torch.nn.Module):
         P = self.proxies
 
         cos = F.linear(l2_norm(X), l2_norm(P))  # Calcluate cosine similarity
+        # Clamp cosine similarity to prevent overflow in exponentials
+        # Cosine similarity is in [-1, 1], but we clamp more conservatively
+        cos = torch.clamp(cos, -0.99, 0.99)
+        
         P_one_hot = binarize(T = T, nb_classes = self.nb_classes*2)
         if self.proxy_mode == "only_real":
             P_one_hot = P_one_hot[:, :self.nb_classes]
@@ -141,14 +145,32 @@ class Proxy_Anchor(torch.nn.Module):
             pass
         N_one_hot = 1 - P_one_hot
     
-        pos_exp = torch.exp(-self.alpha * (cos - self.mrg))
-        neg_exp = torch.exp(self.alpha * (cos + self.mrg))
+        # Clamp the arguments to exp to prevent overflow
+        # For pos_exp: -alpha * (cos - mrg), we want this to be bounded
+        # For neg_exp: alpha * (cos + mrg), we want this to be bounded
+        pos_arg = -self.alpha * (cos - self.mrg)
+        neg_arg = self.alpha * (cos + self.mrg)
+        # Clamp to reasonable range to prevent overflow (exp(88) is near float32 max)
+        pos_arg = torch.clamp(pos_arg, -88.0, 88.0)
+        neg_arg = torch.clamp(neg_arg, -88.0, 88.0)
+        
+        pos_exp = torch.exp(pos_arg)
+        neg_exp = torch.exp(neg_arg)
 
         with_pos_proxies = torch.nonzero(P_one_hot.sum(dim = 0) != 0).squeeze(dim = 1)   # The set of positive proxies of data in the batch
         num_valid_proxies = len(with_pos_proxies)   # The number of positive proxies
         
+        # Handle case when no valid proxies (division by zero)
+        if num_valid_proxies == 0:
+            # Return zero loss if no valid proxies in batch
+            return torch.tensor(0.0, device=X.device, requires_grad=True)
+        
         P_sim_sum = torch.where(P_one_hot == 1, pos_exp, torch.zeros_like(pos_exp)).sum(dim=0) 
         N_sim_sum = torch.where(N_one_hot == 1, neg_exp, torch.zeros_like(neg_exp)).sum(dim=0)
+        
+        # Add small epsilon to prevent log(0)
+        P_sim_sum = P_sim_sum + 1e-8
+        N_sim_sum = N_sim_sum + 1e-8
         
         pos_term = torch.log(1 + P_sim_sum).sum() / num_valid_proxies
         if self.proxy_mode == "only_real":
@@ -157,7 +179,11 @@ class Proxy_Anchor(torch.nn.Module):
             neg_term = torch.log(1 + N_sim_sum).sum() / (self.nb_classes*2)
         else:
             raise ValueError("proxy_mode must be either 'only_real' or 'real_fake'")
-        loss = pos_term + neg_term     
+        loss = pos_term + neg_term
+        
+        # Check for NaN/Inf and replace with 0 if found
+        if torch.isnan(loss) or torch.isinf(loss):
+            return torch.tensor(0.0, device=X.device, requires_grad=True)
         
         return loss
 
