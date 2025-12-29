@@ -80,3 +80,4 @@ if __name__ == "__main__":
     
     test_vae(args.vae_path, args.device)
 
+

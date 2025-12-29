@@ -110,10 +110,19 @@ def generate_test_image(unet, vae, diffusion, device, test_text, style_path, out
             im = torchvision.transforms.ToPILImage()(img_tensor)
             image = im.convert("L")
             
-            # Check if image is mostly white (might need inversion)
+            # Debug: Check image before any inversion
             img_array = np.array(image)
-            if img_array.mean() > 200:
+            img_mean = img_array.mean()
+            print(f"  Image before inversion: mean={img_mean:.2f} (0-255 scale)")
+            
+            # Only invert if image is extremely bright (mean > 240) and has low variance
+            # This prevents inverting images that are legitimately bright but have content
+            if img_mean > 240 and img_array.std() < 10:
+                print(f"  Inverting: image is very bright (mean={img_mean:.2f}) with low variance (std={img_array.std():.2f})")
                 image = ImageOps.invert(image)
+                print(f"  Image after inversion: mean={np.array(image).mean():.2f}")
+            else:
+                print(f"  Not inverting: mean={img_mean:.2f}, std={img_array.std():.2f}")
             
             # Save image
             safe_text = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in test_text)[:50]

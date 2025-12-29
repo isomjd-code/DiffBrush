@@ -297,12 +297,24 @@ class Diffusion:
         print(f"Debug: Model output latents (scaled space) - mean={model_latent_mean:.4f}, std={model_latent_std:.4f}, min={model_latent_min:.4f}, max={model_latent_max:.4f}")
         print(f"  Expected: mean≈0, std≈0.18215 (same as training latents)")
         
-        # Normalize model outputs to match training distribution (mean=0, std=0.18215)
-        # DDIM sampling may produce latents with different variance, so we normalize first
-        if model_latent_std > 1e-6:  # Avoid division by zero
-            x_normalized = (x - model_latent_mean) / model_latent_std * 0.18215
-        else:
+        # Always normalize to ensure VAE receives latents in expected range
+        # The model learns to predict noise, but DDIM sampling may produce latents with different variance
+        # Normalizing ensures consistency with training distribution
+        expected_std = 0.18215
+        std_ratio = model_latent_std / expected_std if expected_std > 1e-6 else 1.0
+        
+        if abs(std_ratio - 1.0) < 0.05:  # Within 5% of expected, skip normalization
+            print(f"  Latents std ratio={std_ratio:.3f} (very close to 1.0), skipping normalization")
             x_normalized = x
+        else:
+            # Normalize to match training distribution (ensures VAE receives correct range)
+            print(f"  Normalizing latents: std ratio={std_ratio:.3f} -> 1.0 (expected std={expected_std:.5f})")
+            if model_latent_std > 1e-6:  # Avoid division by zero
+                x_normalized = (x - model_latent_mean) / model_latent_std * expected_std
+                # Re-center to ensure mean is exactly 0 (handle numerical drift)
+                x_normalized = x_normalized - x_normalized.mean()
+            else:
+                x_normalized = x
         
         # Unscale: convert from scaled space (mean≈0, std≈0.18215) to normalized space (mean≈0, std≈1)
         latents_normalized = 1 / 0.18215 * x_normalized
@@ -494,8 +506,17 @@ class Diffusion:
                   c * predicted_noise + \
                   sigma * noise
         
-        # Unscale: model outputs are in scaled space (mean≈0, std≈0.18215)
-        latents_normalized = 1 / 0.18215 * x
+        # Normalize model outputs to match training distribution (mean=0, std=0.18215)
+        # DDIM sampling may produce latents with different variance, so we normalize first
+        model_latent_mean = x.mean().item()
+        model_latent_std = x.std().item()
+        if model_latent_std > 1e-6:  # Avoid division by zero
+            x_normalized = (x - model_latent_mean) / model_latent_std * 0.18215
+        else:
+            x_normalized = x
+        
+        # Unscale: convert from scaled space (mean≈0, std≈0.18215) to normalized space (mean≈0, std≈1)
+        latents_normalized = 1 / 0.18215 * x_normalized
         
         # Denormalize: VAE expects latents in its original distribution (mean≈2.67, std≈4.74)
         vae_latent_mean = 2.67
