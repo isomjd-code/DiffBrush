@@ -283,7 +283,26 @@ def main(args):
                 
                 # Encode target image to latent space
                 latents = vae.encode(img_for_vae).latent_dist.sample()
+                
+                # Debug: Check raw VAE encoded latents (before scaling)
+                if total_iters == 0 or (total_iters % 1000 == 0 and batch_idx == 0):
+                    raw_latent_mean = latents.mean().item()
+                    raw_latent_std = latents.std().item()
+                    raw_latent_min = latents.min().item()
+                    raw_latent_max = latents.max().item()
+                    print(f"  [Debug] Raw VAE encoded latents - mean={raw_latent_mean:.4f}, std={raw_latent_std:.4f}, min={raw_latent_min:.4f}, max={raw_latent_max:.4f}")
+                    print(f"  Expected: mean≈0, std≈1 (VAE outputs normalized latents)")
+                
                 latents = latents * 0.18215  # scale factor
+                
+                # Debug: Check scaled latents (what model trains on)
+                if total_iters == 0 or (total_iters % 1000 == 0 and batch_idx == 0):
+                    scaled_latent_mean = latents.mean().item()
+                    scaled_latent_std = latents.std().item()
+                    scaled_latent_min = latents.min().item()
+                    scaled_latent_max = latents.max().item()
+                    print(f"  [Debug] Scaled latents (for training) - mean={scaled_latent_mean:.4f}, std={scaled_latent_std:.4f}, min={scaled_latent_min:.4f}, max={scaled_latent_max:.4f}")
+                    print(f"  Expected: mean≈0, std≈0.18215 (scaled by 0.18215)")
             
             # Sample timesteps
             t = diffusion.sample_timesteps(latents.shape[0], finetune=False).to(device)
@@ -310,8 +329,48 @@ def main(args):
                     print(f"\nNote: horizontal_proxy_loss is NaN/Inf (expected with single writer), setting to 0")
                 horizontal_proxy_loss = torch.tensor(0.0, device=device, requires_grad=True)
             
+            # Output diversity regularization to prevent mode collapse
+            diversity_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            diversity_weight = getattr(cfg.SOLVER, 'DIVERSITY_WEIGHT', 0.0)
+            if diversity_weight > 0 and predicted_noise.shape[0] > 1:  # Need batch size > 1
+                # Method 1: Variance regularization - penalize low variance in predictions
+                # Compute variance across batch dimension for each spatial location
+                pred_variance = predicted_noise.var(dim=0, keepdim=False)  # [C, H, W]
+                min_variance = getattr(cfg.SOLVER, 'DIVERSITY_MIN_VARIANCE', 0.1)
+                
+                # Penalize when variance is too low (encourages diversity)
+                variance_penalty = torch.clamp(min_variance - pred_variance, min=0.0)
+                diversity_loss = variance_penalty.mean()
+                
+                # Method 2: Minibatch diversity - penalize similar outputs within batch
+                # Flatten predictions: [B, C, H, W] -> [B, C*H*W]
+                pred_flat = predicted_noise.view(predicted_noise.shape[0], -1)  # [B, C*H*W]
+                
+                # Compute pairwise cosine similarities
+                pred_norm = torch.nn.functional.normalize(pred_flat, p=2, dim=1)
+                similarity_matrix = torch.mm(pred_norm, pred_norm.t())  # [B, B]
+                
+                # Mask out diagonal (self-similarity)
+                batch_size = similarity_matrix.shape[0]
+                mask = 1 - torch.eye(batch_size, device=device)
+                masked_similarities = similarity_matrix * mask
+                
+                # Penalize high similarities (encourage diversity)
+                # Only penalize similarities above a threshold (e.g., 0.9)
+                high_similarity_penalty = torch.clamp(masked_similarities - 0.9, min=0.0)
+                minibatch_diversity = high_similarity_penalty.mean()
+                
+                # Combine both diversity terms
+                diversity_loss = diversity_loss + 0.5 * minibatch_diversity
+                
+                # Log diversity loss periodically
+                if local_rank == 0 and total_iters % 500 == 0:
+                    print(f"\n[Diversity] variance_loss={variance_penalty.mean().item():.6f}, "
+                          f"minibatch_diversity={minibatch_diversity.item():.6f}, "
+                          f"total_diversity={diversity_loss.item():.6f}")
+            
             # Total loss
-            total_loss = noise_loss + 0.1 * vertical_proxy_loss + 0.1 * horizontal_proxy_loss
+            total_loss = noise_loss + 0.1 * vertical_proxy_loss + 0.1 * horizontal_proxy_loss + diversity_weight * diversity_loss
             
             # Check for NaN/Inf in total loss before backward pass
             if torch.isnan(total_loss) or torch.isinf(total_loss):

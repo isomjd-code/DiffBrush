@@ -10,14 +10,16 @@ MODEL:
   NUM_HEADS: 4
   EMB_DIM: 512
 SOLVER:
-  BASE_LR: 0.00005  # Reduced from 0.0001 for stability
+  BASE_LR: 0.00002  # Further reduced to prevent model collapse (was 0.00005)
   EPOCHS: 2000
   WARMUP_ITERS: 20000
   TYPE: AdamW
   GRAD_L2_CLIP: 1.0  # Tighter gradient clipping for stability
+  DIVERSITY_WEIGHT: 0.01  # Weight for diversity regularization (0 to disable)
+  DIVERSITY_MIN_VARIANCE: 0.1  # Minimum variance threshold for diversity loss
 TRAIN:
   TYPE: train
-  IMS_PER_BATCH: 12  # Increased from 8 (13GB/24GB used, 11GB free available)
+  IMS_PER_BATCH: 10  # Reduced from 12 (20GB/24GB used, 4GB free - safer margin)
   IMG_H: 64
   IMG_W: 64
   IMAGE_PATH: data/LatinBHO/images

@@ -284,17 +284,37 @@ class Diffusion:
         
         model.train()
         
-        # Debug: Check final latent stats
+        # Debug: Check final latent stats (model output, in scaled space)
         if torch.isnan(x).any() or torch.isinf(x).any():
             print(f"Warning: NaN or Inf in final latents! Replacing with zeros.")
             x = torch.zeros_like(x)
         
+        # Debug: Check model output latents before unscaling
+        model_latent_mean = x.mean().item()
+        model_latent_std = x.std().item()
+        model_latent_min = x.min().item()
+        model_latent_max = x.max().item()
+        print(f"Debug: Model output latents (scaled space) - mean={model_latent_mean:.4f}, std={model_latent_std:.4f}, min={model_latent_min:.4f}, max={model_latent_max:.4f}")
+        print(f"  Expected: mean≈0, std≈0.18215 (same as training latents)")
+        
         latents = 1 / 0.18215 * x
         
-        # Debug: Check scaled latents
+        # Debug: Check unscaled latents (what VAE expects)
         if torch.isnan(latents).any() or torch.isinf(latents).any():
             print(f"Warning: NaN or Inf in scaled latents! Replacing with zeros.")
             latents = torch.zeros_like(latents)
+        
+        unscaled_latent_mean = latents.mean().item()
+        unscaled_latent_std = latents.std().item()
+        unscaled_latent_min = latents.min().item()
+        unscaled_latent_max = latents.max().item()
+        print(f"Debug: Unscaled latents (VAE input) - mean={unscaled_latent_mean:.4f}, std={unscaled_latent_std:.4f}, min={unscaled_latent_min:.4f}, max={unscaled_latent_max:.4f}")
+        print(f"  Expected: mean≈0, std≈1 (VAE expects normalized latents)")
+        
+        # Check if latents are in reasonable range for VAE
+        if abs(unscaled_latent_mean) > 2.0 or unscaled_latent_std > 3.0 or unscaled_latent_std < 0.1:
+            print(f"  ⚠ WARNING: Latents out of expected range! VAE may produce poor results.")
+            print(f"     This could cause dark/artifact images.")
         
         image = vae.decode(latents).sample
         
