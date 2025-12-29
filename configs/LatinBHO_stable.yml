@@ -19,7 +19,7 @@ SOLVER:
   DIVERSITY_MIN_VARIANCE: 0.1  # Minimum variance threshold for diversity loss
 TRAIN:
   TYPE: train
-  IMS_PER_BATCH: 12  # Increased back to 12 (monitor memory usage)
+  IMS_PER_BATCH: 16  # Increased to 16 (16/24 GB used, 8 GB free available)
   IMG_H: 64
   IMG_W: 64
   IMAGE_PATH: data/LatinBHO/images

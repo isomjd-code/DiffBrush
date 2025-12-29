@@ -289,7 +289,7 @@ class Diffusion:
             print(f"Warning: NaN or Inf in final latents! Replacing with zeros.")
             x = torch.zeros_like(x)
         
-        # Debug: Check model output latents before unscaling
+        # Debug: Check model output latents before normalization
         model_latent_mean = x.mean().item()
         model_latent_std = x.std().item()
         model_latent_min = x.min().item()
@@ -297,8 +297,15 @@ class Diffusion:
         print(f"Debug: Model output latents (scaled space) - mean={model_latent_mean:.4f}, std={model_latent_std:.4f}, min={model_latent_min:.4f}, max={model_latent_max:.4f}")
         print(f"  Expected: mean≈0, std≈0.18215 (same as training latents)")
         
-        # Unscale: model outputs are in scaled space (mean≈0, std≈0.18215)
-        latents_normalized = 1 / 0.18215 * x
+        # Normalize model outputs to match training distribution (mean=0, std=0.18215)
+        # DDIM sampling may produce latents with different variance, so we normalize first
+        if model_latent_std > 1e-6:  # Avoid division by zero
+            x_normalized = (x - model_latent_mean) / model_latent_std * 0.18215
+        else:
+            x_normalized = x
+        
+        # Unscale: convert from scaled space (mean≈0, std≈0.18215) to normalized space (mean≈0, std≈1)
+        latents_normalized = 1 / 0.18215 * x_normalized
         
         # Debug: Check normalized latents (before denormalization)
         if torch.isnan(latents_normalized).any() or torch.isinf(latents_normalized).any():
@@ -423,8 +430,17 @@ class Diffusion:
         
         model.train()
         
-        # Unscale: model outputs are in scaled space (mean≈0, std≈0.18215)
-        latents_normalized = 1 / 0.18215 * x
+        # Normalize model outputs to match training distribution (mean=0, std=0.18215)
+        # DDPM sampling may produce latents with different variance, so we normalize first
+        model_latent_mean = x.mean().item()
+        model_latent_std = x.std().item()
+        if model_latent_std > 1e-6:  # Avoid division by zero
+            x_normalized = (x - model_latent_mean) / model_latent_std * 0.18215
+        else:
+            x_normalized = x
+        
+        # Unscale: convert from scaled space (mean≈0, std≈0.18215) to normalized space (mean≈0, std≈1)
+        latents_normalized = 1 / 0.18215 * x_normalized
         
         # Denormalize: VAE expects latents in its original distribution (mean≈2.67, std≈4.74)
         vae_latent_mean = 2.67
