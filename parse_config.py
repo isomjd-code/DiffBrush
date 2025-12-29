@@ -183,6 +183,32 @@ __C.SOLVER.DIVERSITY_MIN_VARIANCE = 0.1
 __C.SOLVER.DIVERSITY_START_ITER = 0
 
 # ---------------------------------------------------------------------------- #
+# PyLaia Readability Supervisor options
+# ---------------------------------------------------------------------------- #
+__C.PYLAIA = AttrDict()
+
+# Enable PyLaia CTC loss for readability supervision
+__C.PYLAIA.ENABLED = False
+
+# Path to PyLaia checkpoint (.ckpt file)
+__C.PYLAIA.CHECKPOINT = ''
+
+# Path to PyLaia symbols file (syms.txt)
+__C.PYLAIA.SYMS_PATH = ''
+
+# PyLaia expected input height (typically 128)
+__C.PYLAIA.INPUT_HEIGHT = 128
+
+# Weight for CTC loss (0.01-0.1 recommended)
+__C.PYLAIA.WEIGHT = 0.1
+
+# Start applying CTC loss after N iterations (model needs to learn basic shapes first)
+__C.PYLAIA.START_ITER = 10000
+
+# Apply CTC loss every N batches (for efficiency, VAE decode is heavy)
+__C.PYLAIA.APPLY_EVERY = 4
+
+# ---------------------------------------------------------------------------- #
 # MISC options
 # ---------------------------------------------------------------------------- #
 

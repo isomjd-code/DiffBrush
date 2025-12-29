@@ -50,7 +50,11 @@ class BaseDataset(Dataset):
             for i in train_data:
                 writer_id = i.split(' ',1)[0].split(',')[0]
                 img_idx = i.split(' ',1)[0].split(',')[1]
-                image = img_idx + '.png'
+                # Handle both cases: img_idx with or without .png extension
+                if img_idx.endswith('.png'):
+                    image = img_idx
+                else:
+                    image = img_idx + '.png'
                 transcription = i.split(' ',1)[1]
                 full_dict[idx] = {'image': image, 'wid': writer_id, 'label':transcription}
                 idx += 1
@@ -77,11 +81,20 @@ class BaseDataset(Dataset):
         """Filter out indices where images would be wider than fixed_len after scaling by 0.5"""
         valid_indices = []
         skipped_count = 0
+        missing_count = 0
+        too_wide_count = 0
+        error_count = 0
+        
         for idx in indices:
             image_name = self.data_dict[idx]['image']
             wr_id = self.data_dict[idx]['wid']
             img_path = os.path.join(self.image_path, wr_id, image_name)
             try:
+                if not os.path.exists(img_path):
+                    missing_count += 1
+                    skipped_count += 1
+                    continue
+                
                 with Image.open(img_path) as img:
                     orig_width, orig_height = img.size
                     # Scale down by factor of 2
@@ -90,14 +103,43 @@ class BaseDataset(Dataset):
                     if scaled_width <= self.fixed_len:
                         valid_indices.append(idx)
                     else:
+                        too_wide_count += 1
                         skipped_count += 1
             except Exception as e:
                 # Skip images that can't be opened
+                error_count += 1
                 skipped_count += 1
+                if error_count <= 5:  # Print first 5 errors
+                    print(f"  Error opening {img_path}: {e}")
                 continue
         
         if skipped_count > 0:
-            print(f"Filtered out {skipped_count} images that would be wider than {self.fixed_len}px after scaling")
+            print(f"Filtered out {skipped_count} images:")
+            if missing_count > 0:
+                print(f"  - {missing_count} missing files")
+            if too_wide_count > 0:
+                print(f"  - {too_wide_count} too wide (>{self.fixed_len}px after scaling)")
+            if error_count > 0:
+                print(f"  - {error_count} errors opening files")
+        
+        if len(valid_indices) == 0:
+            print(f"\n⚠️ WARNING: No valid images found!")
+            print(f"  Image path: {self.image_path}")
+            print(f"  Expected structure: {self.image_path}/{{writer_id}}/{{image_name}}")
+            # Check if image_path exists
+            if not os.path.exists(self.image_path):
+                print(f"  ERROR: Image directory does not exist: {self.image_path}")
+            else:
+                # List some writer directories
+                writer_dirs = [d for d in os.listdir(self.image_path) if os.path.isdir(os.path.join(self.image_path, d))]
+                print(f"  Found {len(writer_dirs)} writer directories: {writer_dirs[:5]}...")
+                if len(writer_dirs) > 0:
+                    # Check one writer directory
+                    sample_writer = writer_dirs[0]
+                    sample_writer_path = os.path.join(self.image_path, sample_writer)
+                    sample_images = [f for f in os.listdir(sample_writer_path) if f.endswith(('.png', '.jpg', '.jpeg'))]
+                    print(f"  Sample writer '{sample_writer}' has {len(sample_images)} images")
+        
         return valid_indices
 
 

@@ -4,11 +4,13 @@ import random
 from parse_config import cfg, cfg_from_file, assert_and_infer_cfg
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from data_loader.IAMDataset import IAMDataset
 from data_loader.LatinBHODataset import LatinBHODataset, LatinBHOGenerateDataset
 from models.unet import UNetModel
 from diffusers import AutoencoderKL
 from models.diffusion import Diffusion, EMA
+from models.pylaia_crnn import create_pylaia_supervisor, SymbolTable
 import torch.distributed as dist
 from tqdm import tqdm
 from utils.util import fix_seed
@@ -168,7 +170,25 @@ def main(args):
     if 'IAM' in args.cfg_file or getattr(cfg, 'DATASET', None) == 'IAM':
         writer_nums = 496
     elif 'LatinBHO' in args.cfg_file or getattr(cfg, 'DATASET', None) == 'LatinBHO':
-        writer_nums = 1
+        # Count unique writers from training data
+        label_path = cfg.TRAIN.LABEL_PATH
+        if os.path.exists(label_path):
+            writers = set()
+            with open(label_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        # Format: writer_id,image_name transcription
+                        parts = line.split(',', 1)
+                        if len(parts) >= 1:
+                            writers.add(parts[0])
+            writer_nums = len(writers)
+            if local_rank == 0:
+                print(f"Detected {writer_nums} unique writers from {label_path}")
+        else:
+            writer_nums = 1  # fallback
+            if local_rank == 0:
+                print(f"Warning: Could not find {label_path}, using default writer_nums=1")
     else:
         writer_nums = 496  # default
     
@@ -213,6 +233,46 @@ def main(args):
             else:
                 print(f"  ✓ VAE output range looks correct")
     
+    """Load PyLaia readability supervisor (if enabled)"""
+    pylaia_model = None
+    pylaia_symbol_table = None
+    pylaia_ctc_loss = None
+    use_pylaia = getattr(cfg, 'PYLAIA', None) is not None and getattr(cfg.PYLAIA, 'ENABLED', False)
+    
+    if use_pylaia:
+        pylaia_cfg = cfg.PYLAIA
+        pylaia_checkpoint = pylaia_cfg.CHECKPOINT
+        pylaia_syms = pylaia_cfg.SYMS_PATH
+        
+        # Check if files exist
+        if not os.path.exists(pylaia_checkpoint):
+            print(f"⚠️ WARNING: PyLaia checkpoint not found at {pylaia_checkpoint}")
+            print("  Disabling PyLaia readability supervision.")
+            use_pylaia = False
+        elif not os.path.exists(pylaia_syms):
+            print(f"⚠️ WARNING: PyLaia symbols file not found at {pylaia_syms}")
+            print("  Disabling PyLaia readability supervision.")
+            use_pylaia = False
+        else:
+            try:
+                pylaia_model, pylaia_symbol_table = create_pylaia_supervisor(
+                    checkpoint_path=pylaia_checkpoint,
+                    syms_path=pylaia_syms,
+                    device=device
+                )
+                # CTC Loss with blank=0 (standard CTC)
+                pylaia_ctc_loss = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
+                if local_rank == 0:
+                    print(f"\n[PyLaia] Readability supervisor loaded successfully")
+                    print(f"  Checkpoint: {pylaia_checkpoint}")
+                    print(f"  Weight: {pylaia_cfg.WEIGHT}")
+                    print(f"  Start iter: {pylaia_cfg.START_ITER}")
+                    print(f"  Apply every: {pylaia_cfg.APPLY_EVERY} batches")
+            except Exception as e:
+                print(f"⚠️ ERROR loading PyLaia model: {e}")
+                print("  Disabling PyLaia readability supervision.")
+                use_pylaia = False
+    
     """Create EMA model"""
     ema_unet = UNetModel(in_channels=cfg.MODEL.IN_CHANNELS, model_channels=cfg.MODEL.EMB_DIM, 
                          out_channels=cfg.MODEL.OUT_CHANNELS, num_res_blocks=cfg.MODEL.NUM_RES_BLOCKS, 
@@ -239,12 +299,23 @@ def main(args):
         
         if os.path.exists(checkpoint_path):
             checkpoint = torch.load(checkpoint_path, map_location=device)
-            unet.load_state_dict(checkpoint['model'])
-            ema_unet.load_state_dict(checkpoint['ema_model'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            start_epoch = checkpoint.get('epoch', 0)
-            start_iter = checkpoint.get('iter', 0)
-            print(f'Resumed from checkpoint {checkpoint_path} at epoch {start_epoch}, iter {start_iter}')
+            try:
+                # Try to load state dict - use strict=False to handle writer_nums mismatch
+                unet.load_state_dict(checkpoint['model'], strict=False)
+                ema_unet.load_state_dict(checkpoint['ema_model'], strict=False)
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                start_epoch = checkpoint.get('epoch', 0)
+                start_iter = checkpoint.get('iter', 0)
+                print(f'Resumed from checkpoint {checkpoint_path} at epoch {start_epoch}, iter {start_iter}')
+                if local_rank == 0:
+                    print('Note: Using strict=False - proxy anchors reinitialized due to writer_nums change')
+            except RuntimeError as e:
+                if 'size mismatch' in str(e) and 'proxy' in str(e):
+                    print(f'⚠️ ERROR: Checkpoint has different number of writers than current model!')
+                    print(f'  Checkpoint was saved with different writer_nums. Starting from scratch.')
+                    print(f'  Delete old checkpoints to start fresh training.')
+                else:
+                    raise
         else:
             print(f'Warning: Checkpoint not found at {checkpoint_path}. Starting from scratch.')
     elif args.resume:
@@ -252,12 +323,23 @@ def main(args):
         checkpoint_path = os.path.join(args.output_dir, 'latest.pth')
         if os.path.exists(checkpoint_path):
             checkpoint = torch.load(checkpoint_path, map_location=device)
-            unet.load_state_dict(checkpoint['model'])
-            ema_unet.load_state_dict(checkpoint['ema_model'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            start_epoch = checkpoint.get('epoch', 0)
-            start_iter = checkpoint.get('iter', 0)
-            print(f'Resumed from latest checkpoint at epoch {start_epoch}, iter {start_iter}')
+            try:
+                # Try to load state dict - use strict=False to handle writer_nums mismatch
+                unet.load_state_dict(checkpoint['model'], strict=False)
+                ema_unet.load_state_dict(checkpoint['ema_model'], strict=False)
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                start_epoch = checkpoint.get('epoch', 0)
+                start_iter = checkpoint.get('iter', 0)
+                print(f'Resumed from latest checkpoint at epoch {start_epoch}, iter {start_iter}')
+                if local_rank == 0:
+                    print('Note: Using strict=False - proxy anchors reinitialized due to writer_nums change')
+            except RuntimeError as e:
+                if 'size mismatch' in str(e) and 'proxy' in str(e):
+                    print(f'⚠️ ERROR: Checkpoint has different number of writers than current model!')
+                    print(f'  Checkpoint was saved with different writer_nums. Starting from scratch.')
+                    print(f'  Delete old checkpoints to start fresh training.')
+                else:
+                    raise
         else:
             print(f'Warning: Latest checkpoint not found at {checkpoint_path}. Starting from scratch.')
     
@@ -488,11 +570,165 @@ def main(args):
                     print(f"\n[Diversity] weight={current_diversity_weight:.4f}, batch_var={batch_var.item():.6f}, "
                           f"diversity_loss={diversity_loss.item():.6f}")
             
+            # PyLaia CTC Loss for readability supervision
+            ctc_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            ctc_weight = 0.0
+            
+            if use_pylaia and pylaia_model is not None:
+                pylaia_cfg = cfg.PYLAIA
+                pylaia_start_iter = getattr(pylaia_cfg, 'START_ITER', 10000)
+                pylaia_apply_every = getattr(pylaia_cfg, 'APPLY_EVERY', 4)
+                
+                # Only apply after start_iter and every N batches (for efficiency)
+                if total_iters >= pylaia_start_iter and batch_idx % pylaia_apply_every == 0:
+                    ctc_weight = pylaia_cfg.WEIGHT
+                    
+                    try:
+                        # Get transcriptions from batch
+                        transcriptions = data.get('transcr', None)
+                        
+                        if transcriptions is not None:
+                            # Calculate predicted x_0 (clean latent estimate) from noisy x and predicted noise
+                            # x_t = sqrt(alpha_hat) * x_0 + sqrt(1 - alpha_hat) * noise
+                            # => x_0 = (x_t - sqrt(1 - alpha_hat) * noise) / sqrt(alpha_hat)
+                            alpha_hat = diffusion.alpha_hat[t][:, None, None, None]
+                            x_0_pred = (x - (1 - alpha_hat).sqrt() * predicted_noise) / alpha_hat.sqrt()
+                            
+                            # Clamp x_0 to reasonable range
+                            x_0_pred = x_0_pred.clamp(-3, 3)
+                            
+                            # Unscale and un-center latents for VAE
+                            latents_for_vae = x_0_pred / 0.18215
+                            
+                            # Decode through VAE to get predicted image
+                            # Note: We need gradients to flow, so don't use torch.no_grad()
+                            decoded_img = vae.decode(latents_for_vae).sample
+                            
+                            # Convert to grayscale [B, 3, H, W] -> [B, 1, H, W]
+                            decoded_gray = 0.299 * decoded_img[:, 0:1, :, :] + \
+                                          0.587 * decoded_img[:, 1:2, :, :] + \
+                                          0.114 * decoded_img[:, 2:3, :, :]
+                            
+                            # UPSCALE from DiffBrush (64px) to PyLaia (128px) height
+                            # DiffBrush uses 64px height, PyLaia expects 128px
+                            # Scale factor: 128/64 = 2x
+                            pylaia_height = getattr(pylaia_cfg, 'INPUT_HEIGHT', 128)
+                            current_height = decoded_gray.shape[2]
+                            current_width = decoded_gray.shape[3]
+                            scale_factor = pylaia_height / current_height
+                            new_width = int(current_width * scale_factor)
+                            
+                            # Log resize info periodically
+                            if local_rank == 0 and total_iters % 2000 == 0:
+                                print(f"\n[PyLaia] Upscaling image: {current_height}x{current_width} -> {pylaia_height}x{new_width} (scale={scale_factor:.2f}x)")
+                            
+                            decoded_resized = F.interpolate(
+                                decoded_gray, 
+                                size=(pylaia_height, new_width), 
+                                mode='bilinear', 
+                                align_corners=False
+                            )
+                            
+                            # Normalize for PyLaia: convert VAE output [-1, 1] to [0, 1]
+                            # PyLaia was trained on images normalized to [0, 1]
+                            decoded_normalized = (decoded_resized + 1) / 2
+                            decoded_normalized = decoded_normalized.clamp(0, 1)
+                            
+                            # Normalization sanity check (first activation only)
+                            if total_iters == pylaia_start_iter and local_rank == 0:
+                                print(f"\n[PyLaia Normalization Check]")
+                                print(f"  VAE output (decoded_img): range=[{decoded_img.min().item():.3f}, {decoded_img.max().item():.3f}], mean={decoded_img.mean().item():.3f}")
+                                print(f"  After grayscale: range=[{decoded_gray.min().item():.3f}, {decoded_gray.max().item():.3f}]")
+                                print(f"  After resize ({decoded_gray.shape[2]}→{decoded_resized.shape[2]}px): range=[{decoded_resized.min().item():.3f}, {decoded_resized.max().item():.3f}]")
+                                print(f"  After [0,1] normalize: range=[{decoded_normalized.min().item():.3f}, {decoded_normalized.max().item():.3f}], mean={decoded_normalized.mean().item():.3f}")
+                                print(f"  Expected for PyLaia: [0, 1] with mean ~0.5 for typical document images")
+                            
+                            # Pass through frozen PyLaia model
+                            # PyLaia returns log probabilities [T, B, num_classes]
+                            pylaia_output = pylaia_model(decoded_normalized)
+                            
+                            # Prepare targets for CTC loss
+                            batch_size = len(transcriptions)
+                            target_indices = []
+                            target_lengths = []
+                            
+                            for transcr in transcriptions:
+                                indices = pylaia_symbol_table.encode(transcr)
+                                target_indices.extend(indices)
+                                target_lengths.append(len(indices))
+                            
+                            targets = torch.tensor(target_indices, dtype=torch.long, device=device)
+                            target_lengths = torch.tensor(target_lengths, dtype=torch.long, device=device)
+                            
+                            # Input lengths (time steps from PyLaia output)
+                            input_lengths = torch.full(
+                                (batch_size,), 
+                                pylaia_output.shape[0], 
+                                dtype=torch.long, 
+                                device=device
+                            )
+                            
+                            # Calculate CTC loss
+                            ctc_loss = pylaia_ctc_loss(
+                                pylaia_output,  # [T, B, C] log probs
+                                targets,        # [sum(target_lengths)]
+                                input_lengths,  # [B]
+                                target_lengths  # [B]
+                            )
+                            
+                            # Handle NaN/Inf
+                            if torch.isnan(ctc_loss) or torch.isinf(ctc_loss):
+                                ctc_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                                if local_rank == 0 and total_iters % 500 == 0:
+                                    print(f"\n[PyLaia] CTC loss was NaN/Inf, setting to 0")
+                            
+                            # ========================================
+                            # GRADIENT VERIFICATION (Critical Sanity Check)
+                            # Run once when PyLaia first activates to verify gradients flow
+                            # ========================================
+                            if total_iters == pylaia_start_iter and local_rank == 0:
+                                print(f"\n{'='*60}")
+                                print(f"[PyLaia Gradient Check] First activation at iter {total_iters}")
+                                print(f"  CTC Loss: {ctc_loss.item():.4f}")
+                                print(f"  x_0_pred requires_grad: {x_0_pred.requires_grad}")
+                                print(f"  latents_for_vae requires_grad: {latents_for_vae.requires_grad}")
+                                print(f"  decoded_img requires_grad: {decoded_img.requires_grad}")
+                                print(f"  pylaia_output requires_grad: {pylaia_output.requires_grad}")
+                                
+                                # Test gradient flow by doing a backward pass on CTC loss alone
+                                if ctc_loss.requires_grad and x_0_pred.requires_grad:
+                                    # Compute gradient of ctc_loss w.r.t. x_0_pred
+                                    test_grad = torch.autograd.grad(
+                                        ctc_loss, x_0_pred, 
+                                        retain_graph=True, 
+                                        allow_unused=True
+                                    )[0]
+                                    if test_grad is not None:
+                                        grad_magnitude = test_grad.abs().mean().item()
+                                        print(f"  ✓ Gradient flows! x_0_pred grad magnitude: {grad_magnitude:.6f}")
+                                        if grad_magnitude < 1e-10:
+                                            print(f"    ⚠️ WARNING: Gradient is very small!")
+                                    else:
+                                        print(f"  ❌ ERROR: No gradient from CTC loss to x_0_pred!")
+                                        print(f"     The VAE decoder may be breaking the gradient graph.")
+                                else:
+                                    print(f"  ❌ ERROR: CTC loss or x_0_pred doesn't require grad!")
+                                print(f"{'='*60}\n")
+                            
+                            # Log CTC loss periodically
+                            if local_rank == 0 and total_iters % 500 == 0:
+                                print(f"\n[PyLaia CTC] loss={ctc_loss.item():.4f}, weight={ctc_weight:.4f}")
+                    
+                    except Exception as e:
+                        if local_rank == 0 and total_iters % 1000 == 0:
+                            print(f"\n[PyLaia] Error calculating CTC loss: {e}")
+                        ctc_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            
             # Total loss - skip proxy losses for single writer
             if writer_nums == 1:
-                total_loss = noise_loss + current_diversity_weight * diversity_loss
+                total_loss = noise_loss + current_diversity_weight * diversity_loss + ctc_weight * ctc_loss
             else:
-                total_loss = noise_loss + 0.1 * vertical_proxy_loss + 0.1 * horizontal_proxy_loss + current_diversity_weight * diversity_loss
+                total_loss = noise_loss + 0.1 * vertical_proxy_loss + 0.1 * horizontal_proxy_loss + current_diversity_weight * diversity_loss + ctc_weight * ctc_loss
             
             # Check for NaN/Inf in total loss before backward pass
             if torch.isnan(total_loss) or torch.isinf(total_loss):
@@ -504,6 +740,10 @@ def main(args):
             # Backward pass
             optimizer.zero_grad()
             total_loss.backward()
+            
+            # Free GPU memory after backward pass (especially after CTC loss)
+            if ctc_weight > 0:
+                torch.cuda.empty_cache()
             
             # Gradient check after first backward pass (verify output layer gets gradients)
             if total_iters == 0 and local_rank == 0:
@@ -575,12 +815,17 @@ def main(args):
                 # Show more precision for proxy losses to see if they're just very small
                 v_proxy_val = vertical_proxy_loss.item()
                 h_proxy_val = horizontal_proxy_loss.item()
-                progress_bar.set_postfix({
+                ctc_loss_val = ctc_loss.item() if isinstance(ctc_loss, torch.Tensor) else ctc_loss
+                postfix_dict = {
                     'loss': f'{total_loss.item():.4f}',
                     'noise': f'{noise_loss.item():.4f}',
                     'v_proxy': f'{v_proxy_val:.6f}' if v_proxy_val > 0 else '0.000000',
                     'h_proxy': f'{h_proxy_val:.6f}' if h_proxy_val > 0 else '0.000000'
-                })
+                }
+                # Add CTC loss to progress bar when using PyLaia
+                if use_pylaia and ctc_weight > 0:
+                    postfix_dict['ctc'] = f'{ctc_loss_val:.4f}'
+                progress_bar.set_postfix(postfix_dict)
             
             # Save checkpoint
             if total_iters % cfg.TRAIN.SNAPSHOT_ITERS == 0 and local_rank == 0:

@@ -20,7 +20,7 @@ SOLVER:
   DIVERSITY_START_ITER: 5000  # Start applying diversity regularization after 5k iterations
 TRAIN:
   TYPE: train
-  IMS_PER_BATCH: 12  # Reduced from 16 to avoid GPU memory saturation (24 GB)
+  IMS_PER_BATCH: 6  # Reduced due to PyLaia CTC loss + VAE decode memory overhead
   IMG_H: 64
   IMG_W: 64
   IMAGE_PATH: data/LatinBHO/images
@@ -29,6 +29,16 @@ TRAIN:
   SNAPSHOT_ITERS: 500  # Save checkpoint every 500 iterations with test image
   SNAPSHOT_BEGIN: 0
   SEED: 1001
+# PyLaia readability supervisor settings
+PYLAIA:
+  ENABLED: true  # Enable PyLaia CTC loss for readability supervision
+  # Use weights-only checkpoint (extracted without Lightning dependencies)
+  CHECKPOINT: ../bootstrap_training_data/pylaia_models/model_v22/weights_only.pth
+  SYMS_PATH: ../bootstrap_training_data/pylaia_models/model_v22/syms.txt
+  INPUT_HEIGHT: 128  # PyLaia expects 128px height
+  WEIGHT: 0.1  # Weight for CTC loss (0.01-0.1 recommended)
+  START_ITER: 5000  # Start applying CTC loss after N iterations (model needs to learn basic shapes first)
+  APPLY_EVERY: 32  # Apply CTC loss every N batches (high value for memory/speed)
 TEST:
   TYPE: test
   IMS_PER_BATCH: 8
