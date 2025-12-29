@@ -77,9 +77,10 @@ def generate_test_image(unet, vae, diffusion, device, test_text, style_path, out
         text_ref = text_ref.to(device).repeat(style_input.shape[0], 1, 1, 1)  # [B, T, 16, 16]
         
         # Initialize random noise in latent space
+        # Use scaled normalized space (matches training: mean≈0, std≈0.18215)
         latent_h = style_ref.shape[2] // 8
         latent_w = gen_dataset.fixed_len // 8
-        x = torch.randn((style_input.shape[0], 4, latent_h, latent_w)).to(device)
+        x = torch.randn((style_input.shape[0], 4, latent_h, latent_w)).to(device) * 0.18215
         
         # Generate image using DDIM sampling
         with torch.no_grad():
