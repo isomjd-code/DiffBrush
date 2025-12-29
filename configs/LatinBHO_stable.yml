@@ -15,9 +15,9 @@ SOLVER:
   WARMUP_ITERS: 20000
   TYPE: AdamW
   GRAD_L2_CLIP: 1.0  # Tighter gradient clipping for stability
-  DIVERSITY_WEIGHT: 0.03  # Moderate weight - too high prevents learning, too low allows collapse
-  DIVERSITY_MIN_VARIANCE: 0.1  # Lower threshold to avoid penalizing early learning
-  DIVERSITY_START_ITER: 5000  # Start applying diversity regularization after 5k iterations
+  DIVERSITY_WEIGHT: 0.0  # Disabled - model is stable without it
+  DIVERSITY_MIN_VARIANCE: 0.1
+  DIVERSITY_START_ITER: 5000
 TRAIN:
   TYPE: train
   IMS_PER_BATCH: 6  # Reduced due to PyLaia CTC loss + VAE decode memory overhead
@@ -36,7 +36,7 @@ PYLAIA:
   CHECKPOINT: ../bootstrap_training_data/pylaia_models/model_v22/weights_only.pth
   SYMS_PATH: ../bootstrap_training_data/pylaia_models/model_v22/syms.txt
   INPUT_HEIGHT: 128  # PyLaia expects 128px height
-  WEIGHT: 0.1  # Weight for CTC loss (0.01-0.1 recommended)
+  WEIGHT: 0.01  # Reduced from 0.1 - high gradients were causing heavy clipping
   START_ITER: 5000  # Start applying CTC loss after N iterations (model needs to learn basic shapes first)
   APPLY_EVERY: 32  # Apply CTC loss every N batches (high value for memory/speed)
 TEST:
