@@ -5,7 +5,7 @@ from parse_config import cfg, cfg_from_file, assert_and_infer_cfg
 import torch
 import torch.nn as nn
 from data_loader.IAMDataset import IAMDataset
-from data_loader.LatinBHODataset import LatinBHODataset
+from data_loader.LatinBHODataset import LatinBHODataset, LatinBHOGenerateDataset
 from models.unet import UNetModel
 from diffusers import AutoencoderKL
 from models.diffusion import Diffusion, EMA
@@ -14,8 +14,121 @@ from tqdm import tqdm
 from utils.util import fix_seed
 import numpy as np
 from torch.nn.utils import clip_grad_norm_
+import torchvision
+from PIL import Image, ImageOps
 
 # WRITER_NUMS will be determined based on dataset
+
+def generate_test_image(unet, vae, diffusion, device, test_text, style_path, output_dir, iter_num, dataset_name='LatinBHO'):
+    """
+    Generate a test image to track training progress.
+    
+    Args:
+        unet: The UNet model (use EMA model for better results)
+        vae: The VAE encoder/decoder
+        diffusion: Diffusion model
+        device: Device to run on
+        test_text: Text string to generate
+        style_path: Path to style images
+        output_dir: Output directory for saving images
+        iter_num: Current iteration number
+        dataset_name: Name of dataset ('LatinBHO' or 'IAM')
+    """
+    try:
+        # Create progress tracking directory
+        progress_dir = os.path.join(output_dir, 'progress_images')
+        os.makedirs(progress_dir, exist_ok=True)
+        
+        # Set model to eval mode
+        unet.eval()
+        vae.eval()
+        
+        # Create generate dataset
+        if dataset_name == 'LatinBHO':
+            gen_dataset = LatinBHOGenerateDataset(
+                style_path=style_path,
+                type='test',
+                ref_num=1,
+                content_type='unifont'
+            )
+        else:
+            # For IAM, import and use IAMGenerateDataset
+            from data_loader.IAMDataset import IAMGenerateDataset
+            gen_dataset = IAMGenerateDataset(
+                style_path=style_path,
+                type='test',
+                ref_num=1
+            )
+        
+        # Get style reference
+        data_loader = torch.utils.data.DataLoader(
+            gen_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False
+        )
+        data = next(iter(data_loader))
+        style_ref = data['style'][0]  # [B, 1, H, W]
+        style_input = style_ref.to(device)
+        
+        # Get content glyphs for the text
+        text_ref = gen_dataset.get_content(test_text)  # [1, T, 16, 16]
+        text_ref = text_ref.to(device).repeat(style_input.shape[0], 1, 1, 1)  # [B, T, 16, 16]
+        
+        # Initialize random noise in latent space
+        latent_h = style_ref.shape[2] // 8
+        latent_w = gen_dataset.fixed_len // 8
+        x = torch.randn((style_input.shape[0], 4, latent_h, latent_w)).to(device)
+        
+        # Generate image using DDIM sampling
+        with torch.no_grad():
+            generated_images = diffusion.ddim_sample(
+                unet,
+                vae,
+                style_input.shape[0],
+                x,
+                style_input,
+                text_ref,
+                sampling_timesteps=50,  # Use fewer steps for faster generation during training
+                eta=0.0
+            )
+        
+        # Save generated image
+        for idx, img_tensor in enumerate(generated_images):
+            img_tensor = img_tensor.clamp(0, 1)
+            
+            # Convert to 3-channel if needed
+            if img_tensor.shape[0] == 1:
+                img_tensor = img_tensor.repeat(3, 1, 1)
+            elif img_tensor.shape[0] != 3:
+                print(f"Warning: Unexpected number of channels: {img_tensor.shape[0]}")
+                continue
+            
+            # Convert to PIL Image
+            im = torchvision.transforms.ToPILImage()(img_tensor)
+            image = im.convert("L")
+            
+            # Check if image is mostly white (might need inversion)
+            img_array = np.array(image)
+            if img_array.mean() > 200:
+                image = ImageOps.invert(image)
+            
+            # Save image
+            safe_text = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in test_text)[:50]
+            filename = f"iter_{iter_num:06d}_{safe_text}.png"
+            filepath = os.path.join(progress_dir, filename)
+            image.save(filepath)
+            print(f'Generated test image: {filepath}')
+        
+        # Set model back to train mode
+        unet.train()
+        
+    except Exception as e:
+        print(f'Warning: Failed to generate test image at iter {iter_num}: {e}')
+        # Set model back to train mode even if generation failed
+        unet.train()
+
 
 def main(args):
     """ load config file into cfg"""
@@ -287,6 +400,53 @@ def main(args):
                     'iter': total_iters,
                 }, latest_path)
                 print(f'Saved checkpoint at iter {total_iters}')
+                
+                # Clean up old checkpoints, keeping only the 3 most recent
+                checkpoints_dir = os.path.join(args.output_dir, 'checkpoints')
+                checkpoint_files = [f for f in os.listdir(checkpoints_dir) if f.startswith('checkpoint_') and f.endswith('.pth')]
+                
+                # Extract iteration numbers and sort
+                checkpoint_iters = []
+                for f in checkpoint_files:
+                    try:
+                        iter_num = int(f.replace('checkpoint_', '').replace('.pth', ''))
+                        checkpoint_iters.append((iter_num, f))
+                    except ValueError:
+                        continue
+                
+                # Sort by iteration number (descending) and keep only the 3 most recent
+                checkpoint_iters.sort(reverse=True)
+                if len(checkpoint_iters) > 3:
+                    # Delete older checkpoints
+                    for iter_num, filename in checkpoint_iters[3:]:
+                        old_checkpoint_path = os.path.join(checkpoints_dir, filename)
+                        try:
+                            os.remove(old_checkpoint_path)
+                            print(f'Deleted old checkpoint: {filename}')
+                        except OSError as e:
+                            print(f'Warning: Could not delete old checkpoint {filename}: {e}')
+                
+                # Generate test image to track progress
+                # Use EMA model for better generation quality
+                # Use a fixed test text for consistent comparison
+                if 'LatinBHO' in args.cfg_file or getattr(cfg, 'DATASET', None) == 'LatinBHO':
+                    dataset_name = 'LatinBHO'
+                    test_text = "Et p'd'cus Ioh'es Knyght p' Will'm Byngham attorn' suum uen' & defend' uim & iniur' quando &c Et dicit q'd p'd'ci"
+                else:
+                    dataset_name = 'IAM'
+                    test_text = "The quick brown fox jumps over the lazy dog"  # Different test text for IAM
+                
+                generate_test_image(
+                    unet=ema_unet,  # Use EMA model for generation
+                    vae=vae,
+                    diffusion=diffusion,
+                    device=device,
+                    test_text=test_text,
+                    style_path=cfg.TRAIN.STYLE_PATH,
+                    output_dir=args.output_dir,
+                    iter_num=total_iters,
+                    dataset_name=dataset_name
+                )
         
         if local_rank == 0:
             print(f'Epoch {epoch+1} completed')

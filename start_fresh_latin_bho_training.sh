@@ -4,12 +4,11 @@
 
 cd "$(dirname "$0")"  # Change to diffbrush directory
 
-# Optional: Remove existing checkpoints to start completely fresh
-# Uncomment the next two lines if you want to delete existing checkpoints
-echo "Removing existing checkpoints to start fresh..."
-rm -rf outputs/LatinBHO/checkpoints/*.pth outputs/LatinBHO/latest.pth
+# Remove existing checkpoints and progress images to start completely fresh
+echo "Removing existing checkpoints and progress images to start fresh..."
+rm -rf outputs/LatinBHO/checkpoints/*.pth outputs/LatinBHO/latest.pth outputs/LatinBHO/progress_images/*.png
 
-# Start training with stable config (lower LR, batch size 4, tighter gradient clipping)
+# Start training with stable config (batch size 8, checkpoint every 500 iters)
 python train.py \
     --cfg_file configs/LatinBHO_stable.yml \
     --output_dir outputs/LatinBHO \
