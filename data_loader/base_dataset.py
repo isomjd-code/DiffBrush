@@ -26,7 +26,9 @@ class BaseDataset(Dataset):
         self.style_path = os.path.join(style_path)
         self.tokens = {"PAD_TOKEN": len(letters)}
         self.letter2index = {label: n for n, label in enumerate(self.letters)}
-        self.indices = list(self.data_dict.keys())
+        all_indices = list(self.data_dict.keys())
+        # Filter out indices where images would be too wide after scaling by 0.5
+        self.indices = self._filter_valid_indices(all_indices)
         self.transforms = torchvision.transforms.Compose([
                         torchvision.transforms.ToTensor(),
                         torchvision.transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
@@ -71,16 +73,57 @@ class BaseDataset(Dataset):
         
         return full_dict
 
+    def _filter_valid_indices(self, indices):
+        """Filter out indices where images would be wider than fixed_len after scaling by 0.5"""
+        valid_indices = []
+        skipped_count = 0
+        for idx in indices:
+            image_name = self.data_dict[idx]['image']
+            wr_id = self.data_dict[idx]['wid']
+            img_path = os.path.join(self.image_path, wr_id, image_name)
+            try:
+                with Image.open(img_path) as img:
+                    orig_width, orig_height = img.size
+                    # Scale down by factor of 2
+                    scaled_width = orig_width // 2
+                    # Keep only if scaled width <= fixed_len
+                    if scaled_width <= self.fixed_len:
+                        valid_indices.append(idx)
+                    else:
+                        skipped_count += 1
+            except Exception as e:
+                # Skip images that can't be opened
+                skipped_count += 1
+                continue
+        
+        if skipped_count > 0:
+            print(f"Filtered out {skipped_count} images that would be wider than {self.fixed_len}px after scaling")
+        return valid_indices
+
 
     def get_style_ref(self, wr_id):
         style_list = os.listdir(os.path.join(self.style_path, wr_id))
         style_index = random.sample(range(len(style_list)), 1) # anchor and positive
         style_images = [cv2.imread(os.path.join(self.style_path, wr_id, style_list[index]), flags=0)
                         for index in style_index]
-        height = style_images[0].shape[0]
-        max_w = max([style_image.shape[1] for style_image in style_images])
+        
+        # Resize style images to match training image height (64)
+        # Training images are resized to 64 height, so style images should match
+        target_height = 64  # Match training image height
+        resized_style_images = []
+        for style_image in style_images:
+            orig_height, orig_width = style_image.shape[:2]
+            # Scale down by factor of 2 (same as training images)
+            scaled_width = orig_width // 2
+            scaled_height = orig_height // 2
+            # Resize to scaled dimensions
+            resized = cv2.resize(style_image, (scaled_width, scaled_height), interpolation=cv2.INTER_LANCZOS4)
+            resized_style_images.append(resized)
+        
+        height = resized_style_images[0].shape[0]  # Should be ~64 after scaling
+        max_w = max([style_image.shape[1] for style_image in resized_style_images])
         '''style images'''
-        style_images = [style_image/255.0 for style_image in style_images]
+        style_images = [style_image/255.0 for style_image in resized_style_images]
         new_style_images = np.ones([1, height, max_w], dtype=np.float32)
         new_style_images[0, :, :style_images[0].shape[1]] = style_images[0]
         return new_style_images
@@ -155,28 +198,33 @@ class BaseDataset(Dataset):
         image = Image.open(img_path).convert('RGB')
         
         # Resize and pad image to fixed dimensions
-        # Target: width=1024 (fixed_len), height=128
+        # Target: width=2048 (fixed_len), height=64
+        # Strategy: Scale all images down by factor of 2, then pad
         target_width = self.fixed_len
-        target_height = 128
+        target_height = 64
         
         # Get current dimensions
         orig_width, orig_height = image.size
         
-        # Resize if width > target_width (maintain aspect ratio)
-        if orig_width > target_width:
-            # Calculate new height maintaining aspect ratio
-            new_height = int(orig_height * (target_width / orig_width))
-            image = image.resize((target_width, new_height), Image.Resampling.LANCZOS)
-            orig_width, orig_height = image.size
+        # Scale down by factor of 2
+        scaled_width = orig_width // 2
+        scaled_height = orig_height // 2
         
-        # Pad to target dimensions
+        # Check if scaled width exceeds target (should not happen if filtering worked, but double-check)
+        if scaled_width > target_width:
+            raise ValueError(f"Image {image_name} scaled width {scaled_width} exceeds {target_width}. This should have been filtered during initialization.")
+        
+        # Resize image by scaling down by factor of 2
+        image = image.resize((scaled_width, scaled_height), Image.Resampling.LANCZOS)
+        
+        # Pad to target dimensions (pad on right for width, center for height)
         # Convert to numpy for padding
         img_array = np.array(image)
         
         # Calculate padding needed
-        pad_width = target_width - orig_width  # Padding for width (right side)
-        pad_height_top = (target_height - orig_height) // 2  # Padding for height (top)
-        pad_height_bottom = target_height - orig_height - pad_height_top  # Padding for height (bottom)
+        pad_width = target_width - scaled_width  # Padding for width (right side)
+        pad_height_top = (target_height - scaled_height) // 2  # Padding for height (top)
+        pad_height_bottom = target_height - scaled_height - pad_height_top  # Padding for height (bottom)
         
         # Pad: ((top, bottom), (left, right), (channels))
         if len(img_array.shape) == 2:  # Grayscale
@@ -216,7 +264,7 @@ class BaseDataset(Dataset):
             contents.append(con_symbol)
         contents = torch.cat(contents, dim=-1)
         contents = contents.numpy()
-        # Resize glyph to match image width (which is now fixed_len = 1024 after preprocessing)
+        # Resize glyph to match image width (which is now fixed_len = 2048 after preprocessing)
         # The image has already been resized/padded to fixed_len width
         target_width = self.fixed_len
         contents = cv2.resize(contents, (target_width, 64))
@@ -450,6 +498,19 @@ class GenerateDataset(Dataset):
                 if index == len(style_list) - 1:
                     print(f'writer {wr_id} No style image found')
                 continue
+        
+        # Resize style image to match training image height (64)
+        # Training images are resized to 64 height, so style images should match
+        orig_height, orig_width = style_image.shape[:2]
+        target_height = 64  # Match training image height
+        # Scale down by factor of 2 (same as training images)
+        scaled_width = orig_width // 2
+        scaled_height = orig_height // 2
+        
+        # Resize to scaled dimensions
+        style_image = cv2.resize(style_image, (scaled_width, scaled_height), interpolation=cv2.INTER_LANCZOS4)
+        
+        # Normalize to [0, 1]
         style_image = style_image/255.0
         return style_image, style_idx
 

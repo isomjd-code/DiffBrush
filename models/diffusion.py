@@ -249,10 +249,19 @@ class Diffusion:
         x_start = None
         
         # for time, time_next in tqdm(time_pairs, position=1, leave=False, desc='sampling'):
-        for time, time_next in time_pairs:
+        for step_idx, (time, time_next) in enumerate(time_pairs):
             time = (torch.ones(n) * time).long().to(self.device)
             time_next = (torch.ones(n) * time_next).long().to(self.device)
             predicted_noise = model(x, time, styles, content)
+            
+            # Debug: Check if model is predicting all zeros (model collapse)
+            if step_idx == 0:  # First iteration only
+                pred_mean = predicted_noise.mean().item()
+                pred_std = predicted_noise.std().item()
+                if abs(pred_mean) < 1e-6 and pred_std < 1e-6:
+                    print(f"Warning: Model appears to be predicting all zeros! This suggests model collapse.")
+                elif abs(pred_mean) > 10 or pred_std > 10:
+                    print(f"Warning: Model predictions are very large! mean={pred_mean:.4f}, std={pred_std:.4f}")
             
             beta = self.beta[time][:, None, None, None]
             alpha_hat = self.alpha_hat[time][:, None, None, None]
@@ -275,10 +284,43 @@ class Diffusion:
         
         model.train()
         
+        # Debug: Check final latent stats
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            print(f"Warning: NaN or Inf in final latents! Replacing with zeros.")
+            x = torch.zeros_like(x)
+        
         latents = 1 / 0.18215 * x
+        
+        # Debug: Check scaled latents
+        if torch.isnan(latents).any() or torch.isinf(latents).any():
+            print(f"Warning: NaN or Inf in scaled latents! Replacing with zeros.")
+            latents = torch.zeros_like(latents)
+        
         image = vae.decode(latents).sample
         
+        # Debug: Check VAE output
+        if torch.isnan(image).any() or torch.isinf(image).any():
+            print(f"Warning: NaN or Inf in VAE output! Replacing with zeros.")
+            image = torch.zeros_like(image)
+        
+        # Debug: Check raw VAE output before normalization
+        vae_mean = image.mean().item()
+        vae_std = image.std().item()
+        vae_min = image.min().item()
+        vae_max = image.max().item()
+        print(f"Debug: Raw VAE output - mean={vae_mean:.4f}, std={vae_std:.4f}, min={vae_min:.4f}, max={vae_max:.4f}")
+        
         image = (image / 2 + 0.5).clamp(0, 1)
+        
+        # Debug: Check normalized image stats
+        img_mean = image.mean().item()
+        img_std = image.std().item()
+        img_min = image.min().item()
+        img_max = image.max().item()
+        print(f"Debug: Normalized image - mean={img_mean:.4f}, std={img_std:.4f}, min={img_min:.4f}, max={img_max:.4f}")
+        if img_mean < 0.01 or img_max < 0.1:
+            print(f"Warning: VAE decoded image is very dark! This suggests VAE decode issue or model collapse.")
+        
         image = image.cpu().permute(0, 2, 3, 1).contiguous().numpy()
         
         image = torch.from_numpy(image)

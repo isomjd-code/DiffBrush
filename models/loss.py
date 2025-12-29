@@ -138,7 +138,15 @@ class Proxy_Anchor(torch.nn.Module):
         # Cosine similarity is in [-1, 1], but we clamp more conservatively
         cos = torch.clamp(cos, -0.99, 0.99)
         
-        P_one_hot = binarize(T = T, nb_classes = self.nb_classes*2)
+        # Map T to valid range [0, nb_classes-1] for binarize
+        # label_binarize expects labels in [0, nb_classes), so we map to [0, nb_classes-1]
+        T_mapped = T % self.nb_classes  # Map to [0, nb_classes-1]
+        T_mapped = torch.clamp(T_mapped, 0, self.nb_classes - 1)  # Extra safety
+        
+        # Call binarize with nb_classes*2 - label_binarize will create one-hot vectors
+        # For nb_classes=1, calling binarize(T=[0], nb_classes=2) creates [[1, 0]]
+        # Then we take first nb_classes columns to get [[1]]
+        P_one_hot = binarize(T = T_mapped, nb_classes = self.nb_classes*2)
         if self.proxy_mode == "only_real":
             P_one_hot = P_one_hot[:, :self.nb_classes]
         else:
@@ -157,12 +165,19 @@ class Proxy_Anchor(torch.nn.Module):
         pos_exp = torch.exp(pos_arg)
         neg_exp = torch.exp(neg_arg)
 
-        with_pos_proxies = torch.nonzero(P_one_hot.sum(dim = 0) != 0).squeeze(dim = 1)   # The set of positive proxies of data in the batch
-        num_valid_proxies = len(with_pos_proxies)   # The number of positive proxies
+        # Find which proxies have positive samples
+        P_one_hot_sum = P_one_hot.sum(dim = 0)
+        with_pos_proxies = torch.nonzero(P_one_hot_sum != 0)
+        if with_pos_proxies.dim() > 1:
+            with_pos_proxies = with_pos_proxies.squeeze(dim = 1)
+        elif with_pos_proxies.dim() == 0:
+            with_pos_proxies = with_pos_proxies.unsqueeze(0)
+        num_valid_proxies = with_pos_proxies.numel() if with_pos_proxies.numel() > 0 else 0
         
         # Handle case when no valid proxies (division by zero)
         if num_valid_proxies == 0:
             # Return zero loss if no valid proxies in batch
+            # This can happen if writer IDs are not properly mapped to class indices
             return torch.tensor(0.0, device=X.device, requires_grad=True)
         
         P_sim_sum = torch.where(P_one_hot == 1, pos_exp, torch.zeros_like(pos_exp)).sum(dim=0) 

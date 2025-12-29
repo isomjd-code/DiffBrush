@@ -127,11 +127,18 @@ class Mix_TR(nn.Module):
         vertical_style = self.vertical_head(base_style) # [4*W, B, 512]
         horizontal_style = self.horizontal_head(base_style)
 
+        # Map writer IDs to valid class indices [0, nb_classes-1]
+        # This is necessary because writer IDs from dataset might be arbitrary integers
+        nb_classes = self.vertical_proxy.nb_classes
+        # Map to [0, nb_classes-1] since Proxy_Anchor will handle the binarize call internally
+        wid_mapped = wid % nb_classes  # Ensure all IDs are in valid range [0, nb_classes-1]
+        wid_mapped = torch.clamp(wid_mapped, 0, nb_classes - 1)  # Extra safety clamp
+        
         # 横向采样, 使模型关注垂直风格信息(每个字母所处高度)
         vertical_style_proxy = self.random_horizontal_sample(vertical_style)    # # [2*W, B, 512]
         vertical_style_proxy = self.vertical_pro_mlp(vertical_style_proxy)
         vertical_style_proxy = torch.mean(vertical_style_proxy, dim=0)
-        vertical_style_loss = self.vertical_proxy(vertical_style_proxy, wid)
+        vertical_style_loss = self.vertical_proxy(vertical_style_proxy, wid_mapped)
         # Ensure loss is finite
         if torch.isnan(vertical_style_loss) or torch.isinf(vertical_style_loss):
             vertical_style_loss = torch.tensor(0.0, device=vertical_style_proxy.device, requires_grad=True)
@@ -140,7 +147,7 @@ class Mix_TR(nn.Module):
         horizontal_style_proxy = self.random_vertical_sample(horizontal_style)
         horizontal_style_proxy = self.horizontal_pro_mlp(horizontal_style_proxy)
         horizontal_style_proxy = torch.mean(horizontal_style_proxy, dim=0)
-        horizontal_style_loss = self.horizontal_proxy(horizontal_style_proxy, wid)
+        horizontal_style_loss = self.horizontal_proxy(horizontal_style_proxy, wid_mapped)
         # Ensure loss is finite
         if torch.isnan(horizontal_style_loss) or torch.isinf(horizontal_style_loss):
             horizontal_style_loss = torch.tensor(0.0, device=horizontal_style_proxy.device, requires_grad=True)

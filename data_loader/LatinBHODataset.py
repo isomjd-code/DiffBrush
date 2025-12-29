@@ -8,7 +8,7 @@ from data_loader.base_dataset import BaseDataset, GenerateDataset
 # Define the alphabet for Latin BHO dataset
 # Based on typical Latin characters plus special characters used in the dataset
 letters = " _!\"#&'()*+,-./0123456789:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz¶"
-fixed_len = 1024
+fixed_len = 2048
 
 class LatinBHODataset(BaseDataset):
     def __init__(self, image_path, style_path, text_path, type, content_type='unifont'):

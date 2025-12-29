@@ -10,14 +10,14 @@ MODEL:
   NUM_HEADS: 4
   EMB_DIM: 512
 SOLVER:
-  BASE_LR: 0.0001
+  BASE_LR: 0.00005  # Reduced from 0.0001 for stability
   EPOCHS: 2000
   WARMUP_ITERS: 20000
   TYPE: AdamW
-  GRAD_L2_CLIP: 5.0
+  GRAD_L2_CLIP: 1.0  # Tighter gradient clipping for stability
 TRAIN:
   TYPE: train
-  IMS_PER_BATCH: 4
+  IMS_PER_BATCH: 4  # Increased from 2 for more stable gradients
   IMG_H: 64
   IMG_W: 64
   IMAGE_PATH: data/LatinBHO/images

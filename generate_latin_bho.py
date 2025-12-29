@@ -11,7 +11,7 @@ import torchvision
 from tqdm import tqdm
 from utils.util import fix_seed
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 # For LatinBHO, we have 1 writer
 WRITER_NUMS = 1
@@ -114,13 +114,16 @@ def main(args):
             # shape[0] = B, shape[1] = C (1), shape[2] = H (height), shape[3] = W (width)
             # Match the original generate.py which uses shape[2] for height
             latent_h = style_ref.shape[2] // 8  # Height dimension (H)
-            latent_w = dataset.fixed_len // 8   # Width dimension (fixed_len = 1024, so 1024//8 = 128)
+            latent_w = dataset.fixed_len // 8   # Width dimension (fixed_len = 2048, so 2048//8 = 256)
             print(f"Debug: style_ref.shape = {style_ref.shape}, latent_h = {latent_h}, latent_w = {latent_w}")
             print(f"Debug: text length = {len(text)}, text_ref.shape = {text_ref.shape}")
             x = torch.randn((style_input.shape[0], 4, latent_h, latent_w)).to(device)
             
             # Generate image using DDIM sampling
             # Note: ddim_sample expects: model, vae, n (batch size), x (latents), styles, content, sampling_timesteps, eta
+            print(f"Debug: Starting DDIM sampling with {args.sampling_timesteps} steps")
+            print(f"Debug: Initial noise stats - mean={x.mean().item():.4f}, std={x.std().item():.4f}, min={x.min().item():.4f}, max={x.max().item():.4f}")
+            
             generated_images = diffusion.ddim_sample(
                 unet, 
                 vae, 
@@ -132,13 +135,49 @@ def main(args):
                 eta=args.eta
             )
             
+            print(f"Debug: Generated image stats - mean={generated_images.mean().item():.4f}, std={generated_images.std().item():.4f}, min={generated_images.min().item():.4f}, max={generated_images.max().item():.4f}")
+            
             # Save generated images
             for idx, img_tensor in enumerate(generated_images):
+                # Debug: Check image tensor stats before conversion
+                print(f"Debug: Image tensor stats - mean={img_tensor.mean().item():.4f}, std={img_tensor.std().item():.4f}, min={img_tensor.min().item():.4f}, max={img_tensor.max().item():.4f}")
+                print(f"Debug: Image tensor shape = {img_tensor.shape}")
+                
+                # Check if image is all black (or very dark)
+                if img_tensor.mean().item() < 0.01:
+                    print(f"Warning: Generated image is very dark (mean={img_tensor.mean().item():.4f}). This suggests model collapse or VAE decode issue.")
+                
                 # Convert tensor to PIL Image
                 img_tensor = img_tensor.clamp(0, 1)
+                
+                # If image is grayscale (single channel), convert to 3-channel for ToPILImage
+                if img_tensor.shape[0] == 1:
+                    img_tensor = img_tensor.repeat(3, 1, 1)
+                elif img_tensor.shape[0] == 3:
+                    pass  # Already RGB
+                else:
+                    print(f"Warning: Unexpected number of channels: {img_tensor.shape[0]}")
+                
                 im = torchvision.transforms.ToPILImage()(img_tensor)
                 # Convert to grayscale
                 image = im.convert("L")
+                
+                # Debug: Check PIL image stats
+                import numpy as np
+                img_array = np.array(image)
+                print(f"Debug: PIL image stats - mean={img_array.mean():.2f}, std={img_array.std():.2f}, min={img_array.min()}, max={img_array.max()}")
+                
+                # Check if image is mostly white (mean > 200) - might need inversion
+                if img_array.mean() > 200:
+                    print(f"Note: Image is very bright (mean={img_array.mean():.2f}). Text might be white on black. Trying inversion...")
+                    from PIL import ImageOps
+                    image_inverted = ImageOps.invert(image)
+                    # Save both versions
+                    safe_text = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in text)[:50]
+                    filename_inverted = f"generated_{safe_text}_{idx}_inverted.png"
+                    filepath_inverted = os.path.join(args.save_dir, filename_inverted)
+                    image_inverted.save(filepath_inverted)
+                    print(f"Also saved inverted version: {filepath_inverted}")
                 
                 # Save image
                 # Sanitize text for filename

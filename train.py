@@ -158,6 +158,16 @@ def main(args):
             
             # Encode images to latent space
             with torch.no_grad():
+                # Debug: Check image values before VAE encode (first batch only, every 1000 iters)
+                if total_iters == 0 or (total_iters % 1000 == 0 and batch_idx == 0):
+                    img_min = img_for_vae.min().item()
+                    img_max = img_for_vae.max().item()
+                    img_mean = img_for_vae.mean().item()
+                    print(f"\n[Debug] Image stats before VAE encode - min={img_min:.4f}, max={img_max:.4f}, mean={img_mean:.4f}")
+                    print(f"  Expected range: [-1, 1] for Stable Diffusion VAE")
+                    if img_min < -1.1 or img_max > 1.1:
+                        print(f"  ⚠ WARNING: Image values outside expected range!")
+                
                 # Encode target image to latent space
                 latents = vae.encode(img_for_vae).latent_dist.sample()
                 latents = latents * 0.18215  # scale factor
@@ -190,6 +200,13 @@ def main(args):
             # Total loss
             total_loss = noise_loss + 0.1 * vertical_proxy_loss + 0.1 * horizontal_proxy_loss
             
+            # Check for NaN/Inf in total loss before backward pass
+            if torch.isnan(total_loss) or torch.isinf(total_loss):
+                if local_rank == 0:
+                    print(f"\nWarning: NaN/Inf detected in total_loss at iter {total_iters}. Skipping this batch.")
+                optimizer.zero_grad()
+                continue
+            
             # Backward pass
             optimizer.zero_grad()
             total_loss.backward()
@@ -197,11 +214,20 @@ def main(args):
             # Gradient clipping and compute gradient norm
             if cfg.SOLVER.GRAD_L2_CLIP > 0:
                 grad_norm = clip_grad_norm_(unet.parameters(), cfg.SOLVER.GRAD_L2_CLIP)
+                # Check if gradients exploded after clipping
+                if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                    if local_rank == 0:
+                        print(f"\nWarning: NaN/Inf in grad_norm at iter {total_iters}. Skipping optimizer step.")
+                    continue
             else:
                 # Calculate grad norm even if not clipping
                 parameters = [p for p in unet.parameters() if p.grad is not None]
                 if parameters:
                     grad_norm = torch.norm(torch.stack([torch.norm(p.grad.detach()) for p in parameters]))
+                    if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                        if local_rank == 0:
+                            print(f"\nWarning: NaN/Inf in grad_norm at iter {total_iters}. Skipping optimizer step.")
+                        continue
                 else:
                     grad_norm = 0.0
             
@@ -230,11 +256,14 @@ def main(args):
             
             # Update progress bar
             if local_rank == 0:
+                # Show more precision for proxy losses to see if they're just very small
+                v_proxy_val = vertical_proxy_loss.item()
+                h_proxy_val = horizontal_proxy_loss.item()
                 progress_bar.set_postfix({
                     'loss': f'{total_loss.item():.4f}',
                     'noise': f'{noise_loss.item():.4f}',
-                    'v_proxy': f'{vertical_proxy_loss.item():.4f}',
-                    'h_proxy': f'{horizontal_proxy_loss.item():.4f}'
+                    'v_proxy': f'{v_proxy_val:.6f}' if v_proxy_val > 0 else '0.000000',
+                    'h_proxy': f'{h_proxy_val:.6f}' if h_proxy_val > 0 else '0.000000'
                 })
             
             # Save checkpoint
