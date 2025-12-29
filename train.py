@@ -189,7 +189,27 @@ def main(args):
     """Load checkpoint if exists"""
     start_epoch = 0
     start_iter = 0
-    if args.resume:
+    if args.checkpoint:
+        # Resume from specific checkpoint
+        if os.path.isabs(args.checkpoint) or '/' in args.checkpoint or '\\' in args.checkpoint:
+            # Full path provided
+            checkpoint_path = args.checkpoint
+        else:
+            # Just filename, look in checkpoints directory
+            checkpoint_path = os.path.join(args.output_dir, 'checkpoints', args.checkpoint)
+        
+        if os.path.exists(checkpoint_path):
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            unet.load_state_dict(checkpoint['model'])
+            ema_unet.load_state_dict(checkpoint['ema_model'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            start_epoch = checkpoint.get('epoch', 0)
+            start_iter = checkpoint.get('iter', 0)
+            print(f'Resumed from checkpoint {checkpoint_path} at epoch {start_epoch}, iter {start_iter}')
+        else:
+            print(f'Warning: Checkpoint not found at {checkpoint_path}. Starting from scratch.')
+    elif args.resume:
+        # Resume from latest checkpoint
         checkpoint_path = os.path.join(args.output_dir, 'latest.pth')
         if os.path.exists(checkpoint_path):
             checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -198,7 +218,9 @@ def main(args):
             optimizer.load_state_dict(checkpoint['optimizer'])
             start_epoch = checkpoint.get('epoch', 0)
             start_iter = checkpoint.get('iter', 0)
-            print(f'Resumed from epoch {start_epoch}, iter {start_iter}')
+            print(f'Resumed from latest checkpoint at epoch {start_epoch}, iter {start_iter}')
+        else:
+            print(f'Warning: Latest checkpoint not found at {checkpoint_path}. Starting from scratch.')
     
     """Setup dataset and dataloader"""
     if 'IAM' in args.cfg_file or getattr(cfg, 'DATASET', None) == 'IAM':
@@ -282,18 +304,35 @@ def main(args):
                         print(f"  ⚠ WARNING: Image values outside expected range!")
                 
                 # Encode target image to latent space
-                latents = vae.encode(img_for_vae).latent_dist.sample()
+                # Use mean for deterministic training (more stable than sampling)
+                latent_dist = vae.encode(img_for_vae).latent_dist
+                latents = latent_dist.mean
                 
-                # Debug: Check raw VAE encoded latents (before scaling)
+                # Debug: Check raw VAE encoded latents (before normalization)
                 if total_iters == 0 or (total_iters % 1000 == 0 and batch_idx == 0):
                     raw_latent_mean = latents.mean().item()
                     raw_latent_std = latents.std().item()
                     raw_latent_min = latents.min().item()
                     raw_latent_max = latents.max().item()
                     print(f"  [Debug] Raw VAE encoded latents - mean={raw_latent_mean:.4f}, std={raw_latent_std:.4f}, min={raw_latent_min:.4f}, max={raw_latent_max:.4f}")
-                    print(f"  Expected: mean≈0, std≈1 (VAE outputs normalized latents)")
+                    print(f"  Note: This VAE outputs non-standard distribution (mean≈2.67, std≈4.74)")
                 
-                latents = latents * 0.18215  # scale factor
+                # Normalize latents to mean=0, std=1 (this VAE outputs non-standard distribution)
+                # Use fixed normalization statistics from VAE test (mean=2.67, std=4.74)
+                # This ensures consistent normalization during training and generation
+                vae_latent_mean = 2.67
+                vae_latent_std = 4.74
+                latents_normalized = (latents - vae_latent_mean) / vae_latent_std
+                
+                # Debug: Check normalized latents
+                if total_iters == 0 or (total_iters % 1000 == 0 and batch_idx == 0):
+                    norm_latent_mean = latents_normalized.mean().item()
+                    norm_latent_std = latents_normalized.std().item()
+                    print(f"  [Debug] Normalized latents - mean={norm_latent_mean:.4f}, std={norm_latent_std:.4f}")
+                    print(f"  Expected: mean≈0, std≈1 (after normalization)")
+                
+                # Scale by 0.18215 (Stable Diffusion standard scaling)
+                latents = latents_normalized * 0.18215
                 
                 # Debug: Check scaled latents (what model trains on)
                 if total_iters == 0 or (total_iters % 1000 == 0 and batch_idx == 0):
@@ -522,7 +561,9 @@ if __name__ == '__main__':
                         help='Path to stable diffusion VAE')
     parser.add_argument('--device', type=str, default='cuda', help='device for training')
     parser.add_argument('--local_rank', type=int, default=0, help='local rank for distributed training')
-    parser.add_argument('--resume', action='store_true', help='Resume from checkpoint')
+    parser.add_argument('--resume', action='store_true', help='Resume from latest checkpoint')
+    parser.add_argument('--checkpoint', type=str, default=None, 
+                        help='Resume from specific checkpoint file (e.g., checkpoint_1000.pth or full path)')
     args = parser.parse_args()
     main(args)
 

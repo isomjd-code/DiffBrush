@@ -297,24 +297,39 @@ class Diffusion:
         print(f"Debug: Model output latents (scaled space) - mean={model_latent_mean:.4f}, std={model_latent_std:.4f}, min={model_latent_min:.4f}, max={model_latent_max:.4f}")
         print(f"  Expected: mean≈0, std≈0.18215 (same as training latents)")
         
-        latents = 1 / 0.18215 * x
+        # Unscale: model outputs are in scaled space (mean≈0, std≈0.18215)
+        latents_normalized = 1 / 0.18215 * x
         
-        # Debug: Check unscaled latents (what VAE expects)
-        if torch.isnan(latents).any() or torch.isinf(latents).any():
-            print(f"Warning: NaN or Inf in scaled latents! Replacing with zeros.")
-            latents = torch.zeros_like(latents)
+        # Debug: Check normalized latents (before denormalization)
+        if torch.isnan(latents_normalized).any() or torch.isinf(latents_normalized).any():
+            print(f"Warning: NaN or Inf in normalized latents! Replacing with zeros.")
+            latents_normalized = torch.zeros_like(latents_normalized)
         
+        norm_latent_mean = latents_normalized.mean().item()
+        norm_latent_std = latents_normalized.std().item()
+        print(f"Debug: Normalized latents (after unscaling) - mean={norm_latent_mean:.4f}, std={norm_latent_std:.4f}")
+        print(f"  Expected: mean≈0, std≈1 (normalized space)")
+        
+        # Denormalize: VAE expects latents in its original distribution (mean≈2.67, std≈4.74)
+        # Use fixed statistics from VAE test: mean=2.67, std=4.74
+        # These are approximate - in practice, VAE can handle a range of inputs
+        vae_latent_mean = 2.67
+        vae_latent_std = 4.74
+        
+        # Denormalize: latents = normalized * std + mean
+        latents = latents_normalized * vae_latent_std + vae_latent_mean
+        
+        # Debug: Check denormalized latents (what VAE expects)
         unscaled_latent_mean = latents.mean().item()
         unscaled_latent_std = latents.std().item()
         unscaled_latent_min = latents.min().item()
         unscaled_latent_max = latents.max().item()
-        print(f"Debug: Unscaled latents (VAE input) - mean={unscaled_latent_mean:.4f}, std={unscaled_latent_std:.4f}, min={unscaled_latent_min:.4f}, max={unscaled_latent_max:.4f}")
-        print(f"  Expected: mean≈0, std≈1 (VAE expects normalized latents)")
+        print(f"Debug: Denormalized latents (VAE input) - mean={unscaled_latent_mean:.4f}, std={unscaled_latent_std:.4f}, min={unscaled_latent_min:.4f}, max={unscaled_latent_max:.4f}")
+        print(f"  Expected: mean≈2.67, std≈4.74 (VAE's original distribution)")
         
         # Check if latents are in reasonable range for VAE
-        if abs(unscaled_latent_mean) > 2.0 or unscaled_latent_std > 3.0 or unscaled_latent_std < 0.1:
-            print(f"  ⚠ WARNING: Latents out of expected range! VAE may produce poor results.")
-            print(f"     This could cause dark/artifact images.")
+        if abs(unscaled_latent_mean - vae_latent_mean) > 5.0 or abs(unscaled_latent_std - vae_latent_std) > 3.0:
+            print(f"  ⚠ WARNING: Latents far from VAE's expected distribution! VAE may produce poor results.")
         
         image = vae.decode(latents).sample
         
@@ -408,7 +423,14 @@ class Diffusion:
         
         model.train()
         
-        latents = 1 / 0.18215 * x
+        # Unscale: model outputs are in scaled space (mean≈0, std≈0.18215)
+        latents_normalized = 1 / 0.18215 * x
+        
+        # Denormalize: VAE expects latents in its original distribution (mean≈2.67, std≈4.74)
+        vae_latent_mean = 2.67
+        vae_latent_std = 4.74
+        latents = latents_normalized * vae_latent_std + vae_latent_mean
+        
         image = vae.decode(latents).sample
         
         image = (image / 2 + 0.5).clamp(0, 1)
@@ -456,7 +478,14 @@ class Diffusion:
                   c * predicted_noise + \
                   sigma * noise
         
-        latents = 1 / 0.18215 * x
+        # Unscale: model outputs are in scaled space (mean≈0, std≈0.18215)
+        latents_normalized = 1 / 0.18215 * x
+        
+        # Denormalize: VAE expects latents in its original distribution (mean≈2.67, std≈4.74)
+        vae_latent_mean = 2.67
+        vae_latent_std = 4.74
+        latents = latents_normalized * vae_latent_std + vae_latent_mean
+        
         image = vae.decode(latents).sample
         
         image = (image / 2 + 0.5).clamp(0, 1)   # 将数值范围从[-1,1]缩放至[0, 1]

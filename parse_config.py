@@ -173,6 +173,12 @@ __C.SOLVER.WARMUP_ITERS = 0
 # CLIP Gradient L2 Nrom
 __C.SOLVER.GRAD_L2_CLIP = 1.0
 
+# Diversity regularization weight (0 to disable)
+__C.SOLVER.DIVERSITY_WEIGHT = 0.0
+
+# Minimum variance threshold for diversity loss
+__C.SOLVER.DIVERSITY_MIN_VARIANCE = 0.1
+
 # ---------------------------------------------------------------------------- #
 # MISC options
 # ---------------------------------------------------------------------------- #
