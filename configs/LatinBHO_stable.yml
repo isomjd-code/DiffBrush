@@ -15,8 +15,9 @@ SOLVER:
   WARMUP_ITERS: 20000
   TYPE: AdamW
   GRAD_L2_CLIP: 1.0  # Tighter gradient clipping for stability
-  DIVERSITY_WEIGHT: 0.01  # Weight for diversity regularization (0 to disable)
-  DIVERSITY_MIN_VARIANCE: 0.1  # Minimum variance threshold for diversity loss
+  DIVERSITY_WEIGHT: 0.03  # Moderate weight - too high prevents learning, too low allows collapse
+  DIVERSITY_MIN_VARIANCE: 0.1  # Lower threshold to avoid penalizing early learning
+  DIVERSITY_START_ITER: 5000  # Start applying diversity regularization after 5k iterations
 TRAIN:
   TYPE: train
   IMS_PER_BATCH: 12  # Reduced from 16 to avoid GPU memory saturation (24 GB)

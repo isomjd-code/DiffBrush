@@ -179,6 +179,9 @@ __C.SOLVER.DIVERSITY_WEIGHT = 0.0
 # Minimum variance threshold for diversity loss
 __C.SOLVER.DIVERSITY_MIN_VARIANCE = 0.1
 
+# Iteration to start applying diversity regularization (allows model to learn basics first)
+__C.SOLVER.DIVERSITY_START_ITER = 0
+
 # ---------------------------------------------------------------------------- #
 # MISC options
 # ---------------------------------------------------------------------------- #

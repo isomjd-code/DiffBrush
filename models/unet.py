@@ -143,6 +143,18 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
+def small_init_module(module, scale=0.01):
+    """
+    Initialize a module with small weights (not zero).
+    Used for final output layers where zero initialization can cause training issues.
+    """
+    for p in module.parameters():
+        if p.dim() >= 2:  # Weight matrices
+            nn.init.xavier_uniform_(p, gain=scale)
+        else:  # Bias vectors
+            nn.init.zeros_(p)  # Bias can be zero
+    return module
+
 def zero_module(module):
     """
     Zero out the parameters of a module and return it.
@@ -956,7 +968,7 @@ class UNetModel(nn.Module):
         self.out = nn.Sequential(
             normalization(ch),
             nn.SiLU(),
-            zero_module(conv_nd(dims, model_channels, out_channels, 3, padding=1)),
+            small_init_module(conv_nd(dims, model_channels, out_channels, 3, padding=1), scale=0.01),
         )
         if self.predict_codebook_ids:
             self.id_predictor = nn.Sequential(

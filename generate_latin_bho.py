@@ -117,10 +117,9 @@ def main(args):
             latent_w = dataset.fixed_len // 8   # Width dimension (fixed_len = 2048, so 2048//8 = 256)
             print(f"Debug: style_ref.shape = {style_ref.shape}, latent_h = {latent_h}, latent_w = {latent_w}")
             print(f"Debug: text length = {len(text)}, text_ref.shape = {text_ref.shape}")
-            # Initialize noise in the scaled normalized space (matches training)
-            # Training uses: normalized latents (mean≈0, std≈1) * 0.18215 = (mean≈0, std≈0.18215)
-            # So initial noise should also be in this scaled space
-            x = torch.randn((style_input.shape[0], 4, latent_h, latent_w)).to(device) * 0.18215
+            # Initialize noise - NO scaling here, diffusion process expects unit Gaussian at t=T
+            # The model will handle scaling internally during the diffusion process
+            x = torch.randn((style_input.shape[0], 4, latent_h, latent_w)).to(device)
             
             # Generate image using DDIM sampling
             # Note: ddim_sample expects: model, vae, n (batch size), x (latents), styles, content, sampling_timesteps, eta

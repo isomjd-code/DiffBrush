@@ -77,10 +77,11 @@ def generate_test_image(unet, vae, diffusion, device, test_text, style_path, out
         text_ref = text_ref.to(device).repeat(style_input.shape[0], 1, 1, 1)  # [B, T, 16, 16]
         
         # Initialize random noise in latent space
-        # Use scaled normalized space (matches training: mean≈0, std≈0.18215)
+        # NO scaling here - diffusion process expects unit Gaussian at t=T
+        # The model will handle scaling internally during the diffusion process
         latent_h = style_ref.shape[2] // 8
         latent_w = gen_dataset.fixed_len // 8
-        x = torch.randn((style_input.shape[0], 4, latent_h, latent_w)).to(device) * 0.18215
+        x = torch.randn((style_input.shape[0], 4, latent_h, latent_w)).to(device)
         
         # Generate image using DDIM sampling
         with torch.no_grad():
@@ -172,7 +173,11 @@ def main(args):
         writer_nums = 496  # default
     
     """build model architecture"""
-    diffusion = Diffusion(noise_steps=1000, device=device)
+    # Verify noise_offset is 0 (default) - non-zero can cause train/inference mismatch
+    noise_offset = getattr(cfg.SOLVER, 'NOISE_OFFSET', 0)
+    if noise_offset != 0 and local_rank == 0:
+        print(f"Warning: noise_offset={noise_offset} is non-zero. This may cause train/inference mismatch.")
+    diffusion = Diffusion(noise_steps=1000, noise_offset=noise_offset, device=device)
     unet = UNetModel(in_channels=cfg.MODEL.IN_CHANNELS, model_channels=cfg.MODEL.EMB_DIM, 
                      out_channels=cfg.MODEL.OUT_CHANNELS, num_res_blocks=cfg.MODEL.NUM_RES_BLOCKS, 
                      attention_resolutions=(1,1), channel_mult=(1, 1), num_heads=cfg.MODEL.NUM_HEADS, 
@@ -183,6 +188,30 @@ def main(args):
     vae = vae.to(device)
     vae.requires_grad_(False)
     vae.eval()
+    
+    """Verify VAE encode/decode cycle"""
+    if local_rank == 0:
+        print("\n[VAE Test] Testing VAE encode/decode cycle...")
+        with torch.no_grad():
+            # Create test image in [-1, 1] range (VAE expects this)
+            test_img = torch.randn(1, 3, 64, 64).to(device).clamp(-1, 1)
+            
+            # Encode
+            latent_dist = vae.encode(test_img).latent_dist
+            latent = latent_dist.sample()
+            print(f"  VAE latent: mean={latent.mean().item():.4f}, std={latent.std().item():.4f}, "
+                  f"range=[{latent.min().item():.4f}, {latent.max().item():.4f}]")
+            
+            # Decode
+            decoded = vae.decode(latent).sample
+            print(f"  VAE decoded: mean={decoded.mean().item():.4f}, std={decoded.std().item():.4f}, "
+                  f"range=[{decoded.min().item():.4f}, {decoded.max().item():.4f}]")
+            
+            # The decoded should be roughly in [-1, 1] (VAE outputs in this range)
+            if decoded.min().item() < -2 or decoded.max().item() > 2:
+                print(f"  ⚠️ WARNING: VAE output range unexpected! Expected roughly [-1, 1]")
+            else:
+                print(f"  ✓ VAE output range looks correct")
     
     """Create EMA model"""
     ema_unet = UNetModel(in_channels=cfg.MODEL.IN_CHANNELS, model_channels=cfg.MODEL.EMB_DIM, 
@@ -277,6 +306,20 @@ def main(args):
         os.makedirs(args.output_dir, exist_ok=True)
         os.makedirs(os.path.join(args.output_dir, 'checkpoints'), exist_ok=True)
     
+    """Setup learning rate scheduler to prevent collapse"""
+    # Cosine annealing: gradually reduce LR to help stabilize training
+    # Use a longer schedule - reduce LR more slowly to avoid interfering with learning
+    total_iters_per_epoch = len(data_loader)
+    total_training_iters = total_iters_per_epoch * cfg.SOLVER.EPOCHS
+    # Only reduce LR to 50% of original (not 10%) to maintain learning capacity
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=total_training_iters, eta_min=cfg.SOLVER.BASE_LR * 0.5
+    )
+    # Fast-forward scheduler to current iteration if resuming
+    if start_iter > 0:
+        for _ in range(start_iter):
+            scheduler.step()
+    
     """Training loop"""
     total_iters = start_iter
     num_epochs = cfg.SOLVER.EPOCHS
@@ -293,6 +336,15 @@ def main(args):
             style = data['style'].to(device)  # [B, 1, H, W] - style reference
             content = data['content'].to(device)  # [B, T, 16, 16] - content glyphs
             wid = data['wid'].to(device)  # writer IDs [B]
+            
+            # Input range diagnostics (first batch only, every 1000 iters)
+            if total_iters == 0 or (total_iters % 1000 == 0 and batch_idx == 0):
+                print(f"\n[Input Diagnostics] Raw input ranges:")
+                print(f"  Image: [{img.min().item():.3f}, {img.max().item():.3f}] (expected: [-1, 1])")
+                print(f"  Style: [{style.min().item():.3f}, {style.max().item():.3f}]")
+                print(f"  Content: [{content.min().item():.3f}, {content.max().item():.3f}]")
+                if img.min().item() < -1.1 or img.max().item() > 1.1:
+                    print(f"  ⚠ WARNING: Image values outside expected range!")
             
             # Convert RGB image to grayscale for VAE (VAE expects 3 channels)
             if img.shape[1] == 3:
@@ -314,35 +366,25 @@ def main(args):
                         print(f"  ⚠ WARNING: Image values outside expected range!")
                 
                 # Encode target image to latent space
-                # Use mean for deterministic training (more stable than sampling)
-                latent_dist = vae.encode(img_for_vae).latent_dist
-                latents = latent_dist.mean
+                # Use sample() for stochasticity (helps prevent collapse)
+                with torch.no_grad():
+                    latent_dist = vae.encode(img_for_vae).latent_dist
+                    latents = latent_dist.sample()  # Use sample, not mean
                 
-                # Debug: Check raw VAE encoded latents (before normalization)
+                # Debug: Check raw VAE encoded latents
                 if total_iters == 0 or (total_iters % 1000 == 0 and batch_idx == 0):
                     raw_latent_mean = latents.mean().item()
                     raw_latent_std = latents.std().item()
                     raw_latent_min = latents.min().item()
                     raw_latent_max = latents.max().item()
                     print(f"  [Debug] Raw VAE encoded latents - mean={raw_latent_mean:.4f}, std={raw_latent_std:.4f}, min={raw_latent_min:.4f}, max={raw_latent_max:.4f}")
-                    print(f"  Note: This VAE outputs non-standard distribution (mean≈2.67, std≈4.74)")
                 
-                # Normalize latents to mean=0, std=1 (this VAE outputs non-standard distribution)
-                # Use fixed normalization statistics from VAE test (mean=2.67, std=4.74)
-                # This ensures consistent normalization during training and generation
-                vae_latent_mean = 2.67
-                vae_latent_std = 4.74
-                latents_normalized = (latents - vae_latent_mean) / vae_latent_std
+                # Standard Stable Diffusion scaling only (no custom normalization)
+                latents = latents * 0.18215
                 
-                # Debug: Check normalized latents
-                if total_iters == 0 or (total_iters % 1000 == 0 and batch_idx == 0):
-                    norm_latent_mean = latents_normalized.mean().item()
-                    norm_latent_std = latents_normalized.std().item()
-                    print(f"  [Debug] Normalized latents - mean={norm_latent_mean:.4f}, std={norm_latent_std:.4f}")
-                    print(f"  Expected: mean≈0, std≈1 (after normalization)")
-                
-                # Scale by 0.18215 (Stable Diffusion standard scaling)
-                latents = latents_normalized * 0.18215
+                # Center latents to zero mean (VAE outputs non-zero mean, but model expects zero-mean inputs)
+                # This ensures the model learns on centered latents, matching standard SD behavior
+                latents = latents - latents.mean(dim=[1,2,3], keepdim=True)  # Center per-sample
                 
                 # Debug: Check scaled latents (what model trains on)
                 if total_iters == 0 or (total_iters % 1000 == 0 and batch_idx == 0):
@@ -351,7 +393,7 @@ def main(args):
                     scaled_latent_min = latents.min().item()
                     scaled_latent_max = latents.max().item()
                     print(f"  [Debug] Scaled latents (for training) - mean={scaled_latent_mean:.4f}, std={scaled_latent_std:.4f}, min={scaled_latent_min:.4f}, max={scaled_latent_max:.4f}")
-                    print(f"  Expected: mean≈0, std≈0.18215 (scaled by 0.18215)")
+                    print(f"  Expected: std≈0.18215 * original_std (standard SD scaling)")
             
             # Sample timesteps
             t = diffusion.sample_timesteps(latents.shape[0], finetune=False).to(device)
@@ -363,63 +405,94 @@ def main(args):
             # The model should predict the noise at timestep t
             predicted_noise, vertical_proxy_loss, horizontal_proxy_loss = unet(x, t, style, content, wid, tag='train')
             
+            # Collapse monitoring - check if model predictions are collapsing
+            if local_rank == 0 and total_iters % 100 == 0:
+                with torch.no_grad():
+                    # Per-sample prediction std (should be high, ~1.0 for noise)
+                    pred_per_sample_std = predicted_noise.std(dim=[1,2,3])  # Std per sample
+                    
+                    # Check if all samples are becoming identical (collapse indicator)
+                    if predicted_noise.shape[0] > 1:
+                        # Cosine similarity between first two samples
+                        pred_flat_0 = predicted_noise[0].flatten().unsqueeze(0)
+                        pred_flat_1 = predicted_noise[1].flatten().unsqueeze(0)
+                        sample_sim = torch.nn.functional.cosine_similarity(
+                            pred_flat_0, pred_flat_1, dim=1
+                        ).item()
+                        
+                        # If similarity > 0.95, model is likely collapsing
+                        if sample_sim > 0.95:
+                            print(f"\n⚠️ WARNING: High sample similarity ({sample_sim:.4f}) - possible collapse!")
+                    else:
+                        sample_sim = 0.0
+                    
+                    # Check if per-sample std is too low (collapse indicator)
+                    min_std = pred_per_sample_std.min().item()
+                    max_std = pred_per_sample_std.max().item()
+                    mean_std = pred_per_sample_std.mean().item()
+                    
+                    # Expected std for noise predictions should be around 0.5-1.0
+                    # Very low std (< 0.01) suggests model is predicting near-constant values
+                    if min_std < 0.01:
+                        print(f"\n⚠️ WARNING: Very low per-sample std ({min_std:.6f}) - model may be collapsing!")
+                        print(f"  This is normal at iter 0, but should increase quickly. Monitor closely.")
+                    
+                    print(f"[Collapse Monitor] Per-sample std: "
+                          f"min={min_std:.4f}, max={max_std:.4f}, mean={mean_std:.4f}, "
+                          f"sample_similarity={sample_sim:.4f}")
+            
             # Calculate loss between predicted noise and actual noise
             noise_loss = nn.functional.mse_loss(predicted_noise, noise)
             
-            # Handle NaN/Inf in proxy losses (expected with single writer class)
-            # Suppress repeated warnings - only print once per 1000 iterations
-            if torch.isnan(vertical_proxy_loss) or torch.isinf(vertical_proxy_loss):
-                if local_rank == 0 and total_iters % 1000 == 0:
-                    print(f"\nNote: vertical_proxy_loss is NaN/Inf (expected with single writer), setting to 0")
+            # Disable proxy losses for single writer class (they're degenerate)
+            if writer_nums == 1:
                 vertical_proxy_loss = torch.tensor(0.0, device=device, requires_grad=True)
-            
-            if torch.isnan(horizontal_proxy_loss) or torch.isinf(horizontal_proxy_loss):
-                if local_rank == 0 and total_iters % 1000 == 0:
-                    print(f"\nNote: horizontal_proxy_loss is NaN/Inf (expected with single writer), setting to 0")
                 horizontal_proxy_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            else:
+                # Handle NaN/Inf in proxy losses
+                if torch.isnan(vertical_proxy_loss) or torch.isinf(vertical_proxy_loss):
+                    if local_rank == 0 and total_iters % 1000 == 0:
+                        print(f"\nNote: vertical_proxy_loss is NaN/Inf, setting to 0")
+                    vertical_proxy_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                
+                if torch.isnan(horizontal_proxy_loss) or torch.isinf(horizontal_proxy_loss):
+                    if local_rank == 0 and total_iters % 1000 == 0:
+                        print(f"\nNote: horizontal_proxy_loss is NaN/Inf, setting to 0")
+                    horizontal_proxy_loss = torch.tensor(0.0, device=device, requires_grad=True)
             
             # Output diversity regularization to prevent mode collapse
             diversity_loss = torch.tensor(0.0, device=device, requires_grad=True)
             diversity_weight = getattr(cfg.SOLVER, 'DIVERSITY_WEIGHT', 0.0)
-            if diversity_weight > 0 and predicted_noise.shape[0] > 1:  # Need batch size > 1
-                # Method 1: Variance regularization - penalize low variance in predictions
-                # Compute variance across batch dimension for each spatial location
-                pred_variance = predicted_noise.var(dim=0, keepdim=False)  # [C, H, W]
-                min_variance = getattr(cfg.SOLVER, 'DIVERSITY_MIN_VARIANCE', 0.1)
-                
-                # Penalize when variance is too low (encourages diversity)
-                variance_penalty = torch.clamp(min_variance - pred_variance, min=0.0)
-                diversity_loss = variance_penalty.mean()
-                
-                # Method 2: Minibatch diversity - penalize similar outputs within batch
-                # Flatten predictions: [B, C, H, W] -> [B, C*H*W]
+            diversity_start_iter = getattr(cfg.SOLVER, 'DIVERSITY_START_ITER', 0)
+            
+            # Adaptive diversity: only apply after warmup period, then gradually increase
+            if diversity_weight > 0 and predicted_noise.shape[0] > 1 and total_iters >= diversity_start_iter:
+                # Gradually ramp up diversity weight from 0 to full weight over 5000 iterations
+                if total_iters < diversity_start_iter + 5000:
+                    ramp_factor = (total_iters - diversity_start_iter) / 5000.0
+                    current_diversity_weight = diversity_weight * ramp_factor
+                else:
+                    current_diversity_weight = diversity_weight
+            else:
+                current_diversity_weight = 0.0
+            
+            if current_diversity_weight > 0 and predicted_noise.shape[0] > 1:  # Need batch size > 1
+                # Simpler diversity regularization: encourage batch variance
                 pred_flat = predicted_noise.view(predicted_noise.shape[0], -1)  # [B, C*H*W]
-                
-                # Compute pairwise cosine similarities
-                pred_norm = torch.nn.functional.normalize(pred_flat, p=2, dim=1)
-                similarity_matrix = torch.mm(pred_norm, pred_norm.t())  # [B, B]
-                
-                # Mask out diagonal (self-similarity)
-                batch_size = similarity_matrix.shape[0]
-                mask = 1 - torch.eye(batch_size, device=device)
-                masked_similarities = similarity_matrix * mask
-                
-                # Penalize high similarities (encourage diversity)
-                # Only penalize similarities above a threshold (e.g., 0.9)
-                high_similarity_penalty = torch.clamp(masked_similarities - 0.9, min=0.0)
-                minibatch_diversity = high_similarity_penalty.mean()
-                
-                # Combine both diversity terms
-                diversity_loss = diversity_loss + 0.5 * minibatch_diversity
+                batch_var = pred_flat.var(dim=0).mean()  # Average variance across features
+                # Target variance of 0.5 - penalize if below this
+                diversity_loss = torch.clamp(0.5 - batch_var, min=0.0)
                 
                 # Log diversity loss periodically
                 if local_rank == 0 and total_iters % 500 == 0:
-                    print(f"\n[Diversity] variance_loss={variance_penalty.mean().item():.6f}, "
-                          f"minibatch_diversity={minibatch_diversity.item():.6f}, "
-                          f"total_diversity={diversity_loss.item():.6f}")
+                    print(f"\n[Diversity] weight={current_diversity_weight:.4f}, batch_var={batch_var.item():.6f}, "
+                          f"diversity_loss={diversity_loss.item():.6f}")
             
-            # Total loss
-            total_loss = noise_loss + 0.1 * vertical_proxy_loss + 0.1 * horizontal_proxy_loss + diversity_weight * diversity_loss
+            # Total loss - skip proxy losses for single writer
+            if writer_nums == 1:
+                total_loss = noise_loss + current_diversity_weight * diversity_loss
+            else:
+                total_loss = noise_loss + 0.1 * vertical_proxy_loss + 0.1 * horizontal_proxy_loss + current_diversity_weight * diversity_loss
             
             # Check for NaN/Inf in total loss before backward pass
             if torch.isnan(total_loss) or torch.isinf(total_loss):
@@ -431,6 +504,25 @@ def main(args):
             # Backward pass
             optimizer.zero_grad()
             total_loss.backward()
+            
+            # Gradient check after first backward pass (verify output layer gets gradients)
+            if total_iters == 0 and local_rank == 0:
+                print("\n[Gradient Check] Checking if gradients flow to output layer...")
+                output_layer_has_grad = False
+                for name, param in unet.named_parameters():
+                    if 'out.2' in name and param.grad is not None:  # The conv layer in self.out
+                        grad_norm = param.grad.norm().item()
+                        param_norm = param.norm().item()
+                        print(f"  {name}: param_norm={param_norm:.6f}, grad_norm={grad_norm:.6f}")
+                        if grad_norm < 1e-10:
+                            print(f"    ⚠️ WARNING: Very small gradient! This may indicate a problem.")
+                        else:
+                            output_layer_has_grad = True
+                
+                if not output_layer_has_grad:
+                    print("  ⚠️ WARNING: No gradients found in output layer! Check model architecture.")
+                else:
+                    print("  ✓ Gradients are flowing to output layer")
             
             # Gradient clipping and compute gradient norm
             if cfg.SOLVER.GRAD_L2_CLIP > 0:
@@ -469,6 +561,9 @@ def main(args):
                           f"Timestep range: {t.min().item()}-{t.max().item()}")
             
             optimizer.step()
+            
+            # Update learning rate scheduler
+            scheduler.step()
             
             # Update EMA
             ema.step_ema(ema_unet, unet, step_start_ema=2000)
