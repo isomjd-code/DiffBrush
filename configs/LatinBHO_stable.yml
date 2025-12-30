@@ -10,11 +10,11 @@ MODEL:
   NUM_HEADS: 4
   EMB_DIM: 512
 SOLVER:
-  BASE_LR: 0.00002  # Further reduced to prevent model collapse (was 0.00005)
+  BASE_LR: 0.00005  # Increased - training is stable now
   EPOCHS: 2000
-  WARMUP_ITERS: 20000
+  WARMUP_ITERS: 5000  # Reduced warmup - model learns quickly
   TYPE: AdamW
-  GRAD_L2_CLIP: 1.0  # Tighter gradient clipping for stability
+  GRAD_L2_CLIP: 2.0  # Relaxed - was over-clipping good gradients
   DIVERSITY_WEIGHT: 0.0  # Disabled - model is stable without it
   DIVERSITY_MIN_VARIANCE: 0.1
   DIVERSITY_START_ITER: 5000
@@ -36,8 +36,8 @@ PYLAIA:
   CHECKPOINT: ../bootstrap_training_data/pylaia_models/model_v22/weights_only.pth
   SYMS_PATH: ../bootstrap_training_data/pylaia_models/model_v22/syms.txt
   INPUT_HEIGHT: 128  # PyLaia expects 128px height
-  WEIGHT: 0.01  # Reduced from 0.1 - high gradients were causing heavy clipping
-  START_ITER: 5000  # Start applying CTC loss after N iterations (model needs to learn basic shapes first)
+  WEIGHT: 0.02  # Increased - stronger readability signal
+  START_ITER: 2000  # Start earlier - model learns basic shapes quickly
   APPLY_EVERY: 1  # Apply CTC loss every batch (was 32, reduced batch_size allows this)
   BATCH_SIZE: 2  # Number of samples to use for CTC loss
 TEST:

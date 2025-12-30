@@ -832,7 +832,7 @@ def main(args):
                 continue
             
             # Collapse monitoring - check if model predictions are collapsing
-            if local_rank == 0 and total_iters % 100 == 0:
+            if local_rank == 0 and total_iters % 500 == 0:
                 with torch.no_grad():
                     # Per-sample prediction std (should be high, ~1.0 for noise)
                     pred_per_sample_std = predicted_noise.std(dim=[1,2,3])  # Std per sample
@@ -1231,7 +1231,7 @@ def main(args):
                     grad_norm = 0.0
             
             # Log statistics periodically to diagnose training
-            if local_rank == 0 and total_iters % 100 == 0:
+            if local_rank == 0 and total_iters % 500 == 0:
                 with torch.no_grad():
                     pred_mean = predicted_noise.mean().item()
                     pred_std = predicted_noise.std().item()
