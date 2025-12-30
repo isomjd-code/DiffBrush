@@ -208,6 +208,9 @@ __C.PYLAIA.START_ITER = 10000
 # Apply CTC loss every N batches (for efficiency, VAE decode is heavy)
 __C.PYLAIA.APPLY_EVERY = 4
 
+# Number of samples to use for CTC loss (reduces memory usage)
+__C.PYLAIA.BATCH_SIZE = 2
+
 # ---------------------------------------------------------------------------- #
 # MISC options
 # ---------------------------------------------------------------------------- #
