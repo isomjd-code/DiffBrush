@@ -219,7 +219,9 @@ def generate_test_image(unet, vae, diffusion, device, test_text, style_path, out
         
         # Only take the first style (first writer) instead of all writers
         # This makes progress image generation much faster
-        style_ref = data['style'][0:1]  # [1, 1, H, W] - just first writer
+        # DataLoader adds batch dim: data['style'] is [1, num_writers, 1, H, W]
+        # We want just first writer: [1, 1, H, W]
+        style_ref = data['style'][0, 0:1]  # Remove batch dim, take first writer -> [1, 1, H, W]
         style_input = style_ref.to(device)
         
         # Get content glyphs for the text
@@ -1344,19 +1346,18 @@ def main(args):
                             print(f'Deleted old checkpoint: {filename}')
                         except OSError as e:
                             print(f'Warning: Could not delete old checkpoint {filename}: {e}')
-                
-                # Generate test image to track progress
-                # Use EMA model for better generation quality
-                # Use a fixed test text for consistent comparison
+            
+            # Generate test image every 200 iterations (separate from checkpoint saving)
+            if total_iters % 200 == 0 and local_rank == 0:
                 if 'LatinBHO' in args.cfg_file or getattr(cfg, 'DATASET', None) == 'LatinBHO':
                     dataset_name = 'LatinBHO'
                     test_text = "Et p'd'cus Ioh'es Knyght p' Will'm Byngham attorn' suum uen' & defend' uim & iniur' quando &c Et dicit q'd p'd'ci"
                 else:
                     dataset_name = 'IAM'
-                    test_text = "The quick brown fox jumps over the lazy dog"  # Different test text for IAM
+                    test_text = "The quick brown fox jumps over the lazy dog"
                 
                 generate_test_image(
-                    unet=ema_unet,  # Use EMA model for generation
+                    unet=ema_unet,
                     vae=vae,
                     diffusion=diffusion,
                     device=device,
