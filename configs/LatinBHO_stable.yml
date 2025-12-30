@@ -20,7 +20,7 @@ SOLVER:
   DIVERSITY_START_ITER: 5000
 TRAIN:
   TYPE: train
-  IMS_PER_BATCH: 8  # Increased - PyLaia uses separate smaller batch size now
+  IMS_PER_BATCH: 10  # Main training batch size
   IMG_H: 64
   IMG_W: 64
   IMAGE_PATH: data/LatinBHO/images
@@ -39,7 +39,7 @@ PYLAIA:
   WEIGHT: 0.01  # Reduced from 0.1 - high gradients were causing heavy clipping
   START_ITER: 5000  # Start applying CTC loss after N iterations (model needs to learn basic shapes first)
   APPLY_EVERY: 1  # Apply CTC loss every batch (was 32, reduced batch_size allows this)
-  BATCH_SIZE: 2  # Number of samples to use for CTC loss (reduces memory, default=2)
+  BATCH_SIZE: 2  # Number of samples to use for CTC loss
 TEST:
   TYPE: test
   IMS_PER_BATCH: 8

@@ -207,7 +207,7 @@ def generate_test_image(unet, vae, diffusion, device, test_text, style_path, out
                 ref_num=1
             )
         
-        # Get style reference
+        # Get style reference - only use FIRST writer for quick progress check
         data_loader = torch.utils.data.DataLoader(
             gen_dataset,
             batch_size=1,
@@ -216,19 +216,22 @@ def generate_test_image(unet, vae, diffusion, device, test_text, style_path, out
             pin_memory=False
         )
         data = next(iter(data_loader))
-        style_ref = data['style'][0]  # [B, 1, H, W]
+        
+        # Only take the first style (first writer) instead of all writers
+        # This makes progress image generation much faster
+        style_ref = data['style'][0:1]  # [1, 1, H, W] - just first writer
         style_input = style_ref.to(device)
         
         # Get content glyphs for the text
         text_ref = gen_dataset.get_content(test_text)  # [1, T, 16, 16]
-        text_ref = text_ref.to(device).repeat(style_input.shape[0], 1, 1, 1)  # [B, T, 16, 16]
+        text_ref = text_ref.to(device)  # [1, T, 16, 16] - no repeat needed for single style
         
         # Initialize random noise in latent space
         # NO scaling here - diffusion process expects unit Gaussian at t=T
         # The model will handle scaling internally during the diffusion process
         latent_h = style_ref.shape[2] // 8
         latent_w = gen_dataset.fixed_len // 8
-        x = torch.randn((style_input.shape[0], 4, latent_h, latent_w)).to(device)
+        x = torch.randn((1, 4, latent_h, latent_w)).to(device)  # Single sample
         
         # Generate image using DDIM sampling
         with torch.no_grad():
